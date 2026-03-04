@@ -5,7 +5,7 @@
 //!
 //! TODO: This module is meant to go away soon in favor of `ll::Request`.
 
-use crate::ll::{fuse_abi as abi, Errno, Response};
+use crate::ll::{fuse_abi as abi, Errno, Operation, RequestError, Response};
 use log::{debug, error, warn};
 use std::convert::TryFrom;
 #[cfg(feature = "abi-7-28")]
@@ -60,29 +60,34 @@ impl<'a> Request<'a> {
     pub fn dispatch<FS: Filesystem>(
         &self,
         se: &mut FilesystemSession<FS>,
-        sender: &(impl ReplySender + Clone),
+        sender: impl ReplySender,
     ) {
         debug!("{}", self.request);
         let unique = self.request.unique();
 
-        let res = match self.dispatch_req(se, sender) {
-            Ok(Some(resp)) => resp,
+        let (resp, sender) = match self.dispatch_req(se, sender) {
+            Ok(Some((resp, sender))) => (resp, sender),
             Ok(None) => return,
-            Err(errno) => self.request.reply_err(errno),
-        }
-        .with_iovec(unique, |iov| sender.send(iov));
+            Err((errno, sender)) => (self.request.reply_err(errno), sender),
+        };
+        let res = resp.with_iovec(unique, |iov| sender.send(iov));
 
         if let Err(err) = res {
             warn!("Request {:?}: Failed to send reply: {}", unique, err)
         }
     }
 
-    fn dispatch_req<FS: Filesystem>(
+    fn dispatch_req<FS: Filesystem, RS: ReplySender>(
         &self,
         se: &mut FilesystemSession<FS>,
-        sender: &(impl ReplySender + Clone),
-    ) -> Result<Option<Response<'_>>, Errno> {
-        let op = self.request.operation().map_err(|_| Errno::ENOSYS)?;
+        sender: RS,
+    ) -> Result<Option<(Response<'_>, RS)>, (Errno, RS)> {
+        let op = match self.request.operation() {
+            Ok(op) => op,
+            Err(_) => {
+                return Err((Errno::ENOSYS, sender));
+            }
+        };
         // Implement allow_root & access check for auto_unmount
         if (se.allowed == SessionACL::RootAndOwner
             && self.request.uid() != se.session_owner
@@ -106,7 +111,7 @@ impl<'a> Request<'a> {
                     | ll::Operation::Release(_)
                     | ll::Operation::ReleaseDir(_) => {}
                     _ => {
-                        return Err(Errno::EACCES);
+                        return Err((Errno::EACCES, sender));
                     }
                 }
             }
@@ -126,7 +131,7 @@ impl<'a> Request<'a> {
                     | ll::Operation::Release(_)
                     | ll::Operation::ReleaseDir(_) => {}
                     _ => {
-                        return Err(Errno::EACCES);
+                        return Err((Errno::EACCES, sender));
                     }
                 }
             }
@@ -145,7 +150,7 @@ impl<'a> Request<'a> {
                     | ll::Operation::Release(_)
                     | ll::Operation::ReleaseDir(_) => {}
                     _ => {
-                        return Err(Errno::EACCES);
+                        return Err((Errno::EACCES, sender));
                     }
                 }
             }
@@ -157,7 +162,7 @@ impl<'a> Request<'a> {
                 let v = x.version();
                 if v < ll::Version(7, 6) {
                     error!("Unsupported FUSE ABI version {}", v);
-                    return Err(Errno::EPROTO);
+                    return Err((Errno::EPROTO, sender));
                 }
                 // Remember ABI version supported by kernel
                 se.proto_major = v.major();
@@ -165,9 +170,9 @@ impl<'a> Request<'a> {
 
                 let mut config = KernelConfig::new(x.capabilities(), x.max_readahead());
                 // Call filesystem init method and give it a chance to return an error
-                se.filesystem
-                    .init(self, &mut config)
-                    .map_err(Errno::from_i32)?;
+                if let Err(e) = se.filesystem.init(self, &mut config) {
+                    return Err((Errno::EIO, sender));
+                }
 
                 // Reply with our desired version and settings. If the kernel supports a
                 // larger major version, it'll re-send a matching init message. If it
@@ -181,28 +186,28 @@ impl<'a> Request<'a> {
                     config.max_write
                 );
                 se.initialized = true;
-                return Ok(Some(x.reply(&config)));
+                return Ok(Some((x.reply(&config), sender)));
             }
             // Any operation is invalid before initialization
             _ if !se.initialized => {
                 warn!("Ignoring FUSE operation before init: {}", self.request);
-                return Err(Errno::EIO);
+                return Err((Errno::EIO, sender));
             }
             // Filesystem destroyed
             ll::Operation::Destroy(x) => {
                 se.filesystem.destroy();
                 se.destroyed = true;
-                return Ok(Some(x.reply()));
+                return Ok(Some((x.reply(), sender)));
             }
             // Any operation is invalid after destroy
             _ if se.destroyed => {
                 warn!("Ignoring FUSE operation after destroy: {}", self.request);
-                return Err(Errno::EIO);
+                return Err((Errno::EIO, sender));
             }
 
             ll::Operation::Interrupt(_) => {
                 // TODO: handle FUSE_INTERRUPT
-                return Err(Errno::ENOSYS);
+                return Err((Errno::ENOSYS, sender));
             }
 
             ll::Operation::Lookup(x) => {
@@ -396,11 +401,7 @@ impl<'a> Request<'a> {
                     self.request.nodeid().into(),
                     x.file_handle().into(),
                     x.offset(),
-                    ReplyDirectory::new(
-                        self.request.unique().into(),
-                        sender.clone(),
-                        x.size() as usize,
-                    ),
+                    ReplyDirectory::new(self.request.unique().into(), sender, x.size() as usize),
                 );
             }
             ll::Operation::ReleaseDir(x) => {
@@ -534,7 +535,7 @@ impl<'a> Request<'a> {
             #[cfg(feature = "abi-7-11")]
             ll::Operation::IoCtl(x) => {
                 if x.unrestricted() {
-                    return Err(Errno::ENOSYS);
+                    return Err((Errno::ENOSYS, sender));
                 } else {
                     se.filesystem.ioctl(
                         self,
@@ -563,7 +564,7 @@ impl<'a> Request<'a> {
             #[cfg(feature = "abi-7-15")]
             ll::Operation::NotifyReply(_) => {
                 // TODO: handle FUSE_NOTIFY_REPLY
-                return Err(Errno::ENOSYS);
+                return Err((Errno::ENOSYS, sender));
             }
             #[cfg(feature = "abi-7-16")]
             ll::Operation::BatchForget(x) => {
@@ -590,7 +591,7 @@ impl<'a> Request<'a> {
                     x.offset(),
                     ReplyDirectoryPlus::new(
                         self.request.unique().into(),
-                        sender.clone(),
+                        sender,
                         x.size() as usize,
                     ),
                 );
@@ -659,7 +660,7 @@ impl<'a> Request<'a> {
             #[cfg(feature = "abi-7-12")]
             ll::Operation::CuseInit(_) => {
                 // TODO: handle CUSE_INIT
-                return Err(Errno::ENOSYS);
+                return Err((Errno::ENOSYS, sender));
             }
         }
         Ok(None)
@@ -667,8 +668,8 @@ impl<'a> Request<'a> {
 
     /// Create a reply object for this request that can be passed to the filesystem
     /// implementation and makes sure that a request is replied exactly once
-    fn reply<T: Reply>(&self, sender: &(impl ReplySender + Clone)) -> T {
-        Reply::new(self.request.unique().into(), sender.clone())
+    fn reply<T: Reply>(&self, sender: impl ReplySender) -> T {
+        Reply::new(self.request.unique().into(), sender)
     }
 
     /// Returns the unique identifier of this request

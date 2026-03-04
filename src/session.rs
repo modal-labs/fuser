@@ -160,7 +160,7 @@ impl<FS: Filesystem> Session<FS> {
             match self.ch.receive(buf) {
                 Ok(size) => match Request::new(&buf[..size]) {
                     // Dispatch request
-                    Some(req) => req.dispatch(&mut self.inner, &self.ch.sender()),
+                    Some(req) => req.dispatch(&mut self.inner, self.ch.sender()),
                     // Quit loop on illegal request
                     None => break,
                 },
