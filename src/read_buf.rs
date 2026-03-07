@@ -5,7 +5,12 @@ use crate::session::MAX_WRITE_SIZE;
 
 /// Size of the buffer for reading a request from the kernel. Since the kernel may send
 /// up to `MAX_WRITE_SIZE` bytes in a write request, we use that value plus some extra space.
-const BUFFER_SIZE: usize = MAX_WRITE_SIZE + 4096;
+const BUFFER_SIZE_EXTRA: usize = 4096;
+const BUFFER_SIZE: usize = MAX_WRITE_SIZE + BUFFER_SIZE_EXTRA;
+
+pub(crate) fn request_buffer_size(max_write: u32) -> usize {
+    max_write as usize + BUFFER_SIZE_EXTRA
+}
 
 /// A buffer that provides an aligned sub-slice for FUSE operations.
 ///
@@ -21,8 +26,12 @@ impl FuseReadBuf {
     ///
     /// The actual buffer may be slightly larger to accommodate alignment requirements.
     pub(crate) fn new() -> Self {
+        Self::with_size(BUFFER_SIZE)
+    }
+
+    pub(crate) fn with_size(size: usize) -> Self {
         Self {
-            buffer: vec![0; BUFFER_SIZE],
+            buffer: vec![0; size],
         }
     }
 

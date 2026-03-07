@@ -43,6 +43,7 @@ use crate::mnt::Mount;
 use crate::mnt::mount_options::Config;
 use crate::notify::Notifier;
 use crate::read_buf::FuseReadBuf;
+use crate::read_buf::request_buffer_size;
 use crate::reply::Reply;
 use crate::reply::ReplyRaw;
 use crate::reply::ReplySender;
@@ -137,6 +138,8 @@ pub struct Session<FS: Filesystem> {
     /// FUSE protocol version, as reported by the kernel.
     /// The field is set to `Some` when the init message is received.
     pub(crate) proto_version: Option<Version>,
+    /// Size of the per-thread request buffer negotiated during the FUSE handshake.
+    pub(crate) request_buffer_size: usize,
     pub(crate) config: Config,
 }
 
@@ -182,6 +185,7 @@ impl<FS: Filesystem> Session<FS> {
             allowed: options.acl,
             session_owner: geteuid(),
             proto_version: None,
+            request_buffer_size: request_buffer_size(MAX_WRITE_SIZE as u32),
             config: options.clone(),
         };
 
@@ -210,6 +214,7 @@ impl<FS: Filesystem> Session<FS> {
             allowed: acl,
             session_owner: geteuid(),
             proto_version: None,
+            request_buffer_size: request_buffer_size(MAX_WRITE_SIZE as u32),
             config,
         };
 
@@ -248,6 +253,7 @@ impl<FS: Filesystem> Session<FS> {
             allowed,
             session_owner,
             proto_version: _,
+            request_buffer_size,
             config,
         } = self;
 
@@ -263,6 +269,8 @@ impl<FS: Filesystem> Session<FS> {
         let Some(n_threads_minus_one) = n_threads.checked_sub(1) else {
             return Err(io::Error::other("n_threads"));
         };
+        // Size per-thread request buffers based on the max write size negotiated during
+        // FUSE_INIT rather than the platform maximum.
 
         let mut filesystem = Arc::new(filesystem);
 
@@ -295,6 +303,7 @@ impl<FS: Filesystem> Session<FS> {
                 ch,
                 allowed,
                 session_owner,
+                request_buffer_size,
             };
             threads.push(
                 thread::Builder::new()
@@ -428,6 +437,7 @@ impl<FS: Filesystem> Session<FS> {
 
             // Remember the ABI version supported by kernel and mark the session initialized.
             self.proto_version = Some(v);
+            self.request_buffer_size = request_buffer_size(config.max_write);
 
             // Log capability status for debugging
             for bit in 0..64 {
@@ -515,13 +525,14 @@ pub(crate) struct SessionEventLoop<FS: Filesystem> {
     pub(crate) filesystem: Arc<FilesystemHolder<FS>>,
     pub(crate) allowed: SessionACL,
     pub(crate) session_owner: Uid,
+    pub(crate) request_buffer_size: usize,
 }
 
 impl<FS: Filesystem> SessionEventLoop<FS> {
     fn event_loop(&self) -> io::Result<()> {
         // Buffer for receiving requests from the kernel. Only one is allocated and
         // it is reused immediately after dispatching to conserve memory and allocations.
-        let mut buf = FuseReadBuf::new();
+        let mut buf = FuseReadBuf::with_size(self.request_buffer_size);
         let buf = buf.as_mut();
         loop {
             // Read the next request from the given channel to kernel driver
