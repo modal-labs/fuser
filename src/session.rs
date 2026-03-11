@@ -31,6 +31,10 @@ pub const MAX_WRITE_SIZE: usize = 16 * 1024 * 1024;
 /// up to MAX_WRITE_SIZE bytes in a write request, we use that value plus some extra space.
 const BUFFER_SIZE: usize = MAX_WRITE_SIZE + 4096;
 
+/// Smaller buffer size for read-only mounts, which never receive FUSE_WRITE requests.
+/// 128 KiB for the max read size + 4096 for the FUSE request header.
+const BUFFER_SIZE_READ_ONLY: usize = 128 * 1024 + 4096;
+
 /// Access control policy for filesystem requests.
 #[derive(Debug, Eq, PartialEq)]
 pub enum SessionACL {
@@ -86,6 +90,8 @@ pub struct Session<FS: Filesystem> {
     mount: Arc<Mutex<Option<Mount>>>,
     /// Mount point
     mountpoint: PathBuf,
+    /// Size of the kernel request buffer (smaller for read-only mounts).
+    buffer_size: usize,
 }
 
 impl<FS: Filesystem> Session<FS> {
@@ -121,6 +127,12 @@ impl<FS: Filesystem> Session<FS> {
             SessionACL::Owner
         };
 
+        let buffer_size = if options.contains(&MountOption::RO) {
+            BUFFER_SIZE_READ_ONLY
+        } else {
+            BUFFER_SIZE
+        };
+
         Ok(Session {
             inner: FilesystemSession {
                 filesystem,
@@ -134,6 +146,7 @@ impl<FS: Filesystem> Session<FS> {
             ch,
             mount: Arc::new(Mutex::new(Some(mount))),
             mountpoint: mountpoint.to_owned(),
+            buffer_size,
         })
     }
 
@@ -149,7 +162,7 @@ impl<FS: Filesystem> Session<FS> {
     pub fn run(&mut self) -> io::Result<()> {
         // Buffer for receiving requests from the kernel. Only one is allocated and
         // it is reused immediately after dispatching to conserve memory and allocations.
-        let mut buffer = vec![0; BUFFER_SIZE];
+        let mut buffer = vec![0; self.buffer_size];
         let buf = aligned_sub_buf(
             buffer.deref_mut(),
             std::mem::align_of::<abi::fuse_in_header>(),
