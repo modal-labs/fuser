@@ -31,37 +31,61 @@ pub const MAX_WRITE_SIZE: usize = 16 * 1024 * 1024;
 /// up to MAX_WRITE_SIZE bytes in a write request, we use that value plus some extra space.
 const BUFFER_SIZE: usize = MAX_WRITE_SIZE + 4096;
 
+/// Access control policy for filesystem requests.
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) enum SessionACL {
+pub enum SessionACL {
+    /// Allow all users.
     All,
+    /// Allow root and the session owner.
     RootAndOwner,
+    /// Allow only the session owner.
     Owner,
+}
+
+/// Transport-agnostic filesystem session state used by [`Request::dispatch`].
+///
+/// This struct holds the filesystem implementation and protocol state needed to
+/// dispatch FUSE requests. It is decoupled from any specific transport (e.g.
+/// `/dev/fuse`, virtiofs) so that it can be used with any source of raw FUSE
+/// request bytes.
+#[derive(Debug)]
+pub struct FilesystemSession<FS: Filesystem> {
+    /// Filesystem operation implementations.
+    pub filesystem: FS,
+    /// Whether to restrict access to owner, root + owner, or unrestricted.
+    pub allowed: SessionACL,
+    /// User that launched the fuser process.
+    pub session_owner: u32,
+    /// FUSE protocol major version.
+    pub proto_major: u32,
+    /// FUSE protocol minor version.
+    pub proto_minor: u32,
+    /// True if the filesystem is initialized (init operation done).
+    pub initialized: bool,
+    /// True if the filesystem was destroyed (destroy operation done).
+    pub destroyed: bool,
+}
+
+impl<FS: Filesystem> Drop for FilesystemSession<FS> {
+    fn drop(&mut self) {
+        if !self.destroyed {
+            self.filesystem.destroy();
+            self.destroyed = true;
+        }
+    }
 }
 
 /// The session data structure
 #[derive(Debug)]
 pub struct Session<FS: Filesystem> {
-    /// Filesystem operation implementations
-    pub(crate) filesystem: FS,
+    /// Filesystem session state (filesystem impl + protocol state).
+    pub(crate) inner: FilesystemSession<FS>,
     /// Communication channel to the kernel driver
     ch: Channel,
     /// Handle to the mount.  Dropping this unmounts.
     mount: Arc<Mutex<Option<Mount>>>,
     /// Mount point
     mountpoint: PathBuf,
-    /// Whether to restrict access to owner, root + owner, or unrestricted
-    /// Used to implement allow_root and auto_unmount
-    pub(crate) allowed: SessionACL,
-    /// User that launched the fuser process
-    pub(crate) session_owner: u32,
-    /// FUSE protocol major version
-    pub(crate) proto_major: u32,
-    /// FUSE protocol minor version
-    pub(crate) proto_minor: u32,
-    /// True if the filesystem is initialized (init operation done)
-    pub(crate) initialized: bool,
-    /// True if the filesystem was destroyed (destroy operation done)
-    pub(crate) destroyed: bool,
 }
 
 impl<FS: Filesystem> Session<FS> {
@@ -98,16 +122,18 @@ impl<FS: Filesystem> Session<FS> {
         };
 
         Ok(Session {
-            filesystem,
+            inner: FilesystemSession {
+                filesystem,
+                allowed,
+                session_owner: geteuid().as_raw(),
+                proto_major: 0,
+                proto_minor: 0,
+                initialized: false,
+                destroyed: false,
+            },
             ch,
             mount: Arc::new(Mutex::new(Some(mount))),
             mountpoint: mountpoint.to_owned(),
-            allowed,
-            session_owner: geteuid().as_raw(),
-            proto_major: 0,
-            proto_minor: 0,
-            initialized: false,
-            destroyed: false,
         })
     }
 
@@ -132,9 +158,9 @@ impl<FS: Filesystem> Session<FS> {
             // Read the next request from the given channel to kernel driver
             // The kernel driver makes sure that we get exactly one request per read
             match self.ch.receive(buf) {
-                Ok(size) => match Request::new(self.ch.sender(), &buf[..size]) {
+                Ok(size) => match Request::new(&buf[..size]) {
                     // Dispatch request
-                    Some(req) => req.dispatch(self),
+                    Some(req) => req.dispatch(&mut self.inner, self.ch.sender()),
                     // Quit loop on illegal request
                     None => break,
                 },
@@ -206,10 +232,6 @@ impl<FS: 'static + Filesystem + Send> Session<FS> {
 
 impl<FS: Filesystem> Drop for Session<FS> {
     fn drop(&mut self) {
-        if !self.destroyed {
-            self.filesystem.destroy();
-            self.destroyed = true;
-        }
         info!("Unmounted {}", self.mountpoint().display());
     }
 }

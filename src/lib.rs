@@ -34,13 +34,13 @@ pub use reply::ReplyPoll;
 #[cfg(target_os = "macos")]
 pub use reply::ReplyXTimes;
 pub use reply::ReplyXattr;
-pub use reply::{Reply, ReplyAttr, ReplyData, ReplyEmpty, ReplyEntry, ReplyOpen};
+pub use reply::{Reply, ReplyAttr, ReplyData, ReplyEmpty, ReplyEntry, ReplyOpen, ReplySender};
 pub use reply::{
     ReplyBmap, ReplyCreate, ReplyDirectory, ReplyDirectoryPlus, ReplyIoctl, ReplyLock, ReplyLseek,
     ReplyStatfs, ReplyWrite,
 };
 pub use request::Request;
-pub use session::{BackgroundSession, Session, SessionUnmounter};
+pub use session::{BackgroundSession, FilesystemSession, Session, SessionACL, SessionUnmounter};
 #[cfg(feature = "abi-7-28")]
 use std::cmp::max;
 #[cfg(feature = "abi-7-13")]
