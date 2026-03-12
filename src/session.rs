@@ -158,9 +158,9 @@ impl<FS: Filesystem> Session<FS> {
             // Read the next request from the given channel to kernel driver
             // The kernel driver makes sure that we get exactly one request per read
             match self.ch.receive(buf) {
-                Ok(size) => match Request::new(Arc::new(self.ch.sender()), &buf[..size]) {
+                Ok(size) => match Request::new(&buf[..size]) {
                     // Dispatch request
-                    Some(req) => req.dispatch(&mut self.inner),
+                    Some(req) => req.dispatch(&mut self.inner, self.ch.sender()),
                     // Quit loop on illegal request
                     None => break,
                 },
