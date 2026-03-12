@@ -64,6 +64,8 @@ pub struct FilesystemSession<FS: Filesystem> {
     pub initialized: bool,
     /// True if the filesystem was destroyed (destroy operation done).
     pub destroyed: bool,
+    /// Size of the request buffer, lowered from BUFFER_SIZE after FUSE_INIT negotiation.
+    pub buffer_size: usize,
 }
 
 impl<FS: Filesystem> Drop for FilesystemSession<FS> {
@@ -130,6 +132,7 @@ impl<FS: Filesystem> Session<FS> {
                 proto_minor: 0,
                 initialized: false,
                 destroyed: false,
+                buffer_size: BUFFER_SIZE,
             },
             ch,
             mount: Arc::new(Mutex::new(Some(mount))),
@@ -150,11 +153,13 @@ impl<FS: Filesystem> Session<FS> {
         // Buffer for receiving requests from the kernel. Only one is allocated and
         // it is reused immediately after dispatching to conserve memory and allocations.
         let mut buffer = vec![0; BUFFER_SIZE];
-        let buf = aligned_sub_buf(
-            buffer.deref_mut(),
-            std::mem::align_of::<abi::fuse_in_header>(),
-        );
         loop {
+            // Recompute aligned sub-buffer each iteration so we can resize the
+            // buffer after FUSE_INIT negotiation.
+            let buf = aligned_sub_buf(
+                buffer.deref_mut(),
+                std::mem::align_of::<abi::fuse_in_header>(),
+            );
             // Read the next request from the given channel to kernel driver
             // The kernel driver makes sure that we get exactly one request per read
             match self.ch.receive(buf) {
@@ -176,6 +181,11 @@ impl<FS: Filesystem> Session<FS> {
                     // Unhandled error
                     _ => return Err(err),
                 },
+            }
+            // After FUSE_INIT, lower the buffer to the negotiated max_write size.
+            if self.inner.buffer_size < buffer.len() {
+                buffer.resize(self.inner.buffer_size, 0);
+                buffer.shrink_to_fit();
             }
         }
         Ok(())
