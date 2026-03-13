@@ -154,6 +154,12 @@ impl<FS: Filesystem> Session<FS> {
         // it is reused immediately after dispatching to conserve memory and allocations.
         let mut buffer = vec![0; BUFFER_SIZE];
         loop {
+            // After FUSE_INIT, lower the buffer to the negotiated max_write size before
+            // recomputing the aligned sub-buffer.
+            if self.inner.buffer_size < buffer.len() {
+                buffer.resize(self.inner.buffer_size, 0);
+                buffer.shrink_to_fit();
+            }
             // Recompute aligned sub-buffer each iteration so we can resize the
             // buffer after FUSE_INIT negotiation.
             let buf = aligned_sub_buf(
@@ -181,11 +187,6 @@ impl<FS: Filesystem> Session<FS> {
                     // Unhandled error
                     _ => return Err(err),
                 },
-            }
-            // After FUSE_INIT, lower the buffer to the negotiated max_write size.
-            if self.inner.buffer_size < buffer.len() {
-                buffer.resize(self.inner.buffer_size, 0);
-                buffer.shrink_to_fit();
             }
         }
         Ok(())
