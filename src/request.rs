@@ -186,6 +186,7 @@ impl<'a> Request<'a> {
                     config.max_write
                 );
                 se.initialized = true;
+                se.buffer_size = config.max_write as usize + 4096;
                 return Ok(Some((x.reply(&config), sender)));
             }
             // Any operation is invalid before initialization
