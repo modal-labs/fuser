@@ -321,6 +321,37 @@ mod test {
         ManuallyDrop::into_inner(tmp);
     }
 
+    /// With `auto_unmount` the unmount is left to the fusermount helper, which only acts
+    /// once the mounting process exits - and only if the connection is already dead. So
+    /// teardown must unmount right away, like every other mount backend does, or the
+    /// mountpoint is left behind as a dangling "transport endpoint is not connected"
+    /// (issue #407).
+    ///
+    /// The `mount_unmount` name prefix keeps this test covered by the
+    /// `--skip=mnt::test::mount_unmount` filter used on platforms where
+    /// unprivileged mounting is unavailable.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn mount_unmount_auto_unmount() {
+        use std::mem::ManuallyDrop;
+
+        let tmp = ManuallyDrop::new(tempfile::tempdir().unwrap());
+        // The mount table lists the canonical path
+        let mountpoint = tmp.path().canonicalize().unwrap();
+        let options = [MountOption::AutoUnmount];
+        let (file, mount) = Mount::new(&mountpoint, &options, SessionACL::default()).unwrap();
+        assert!(is_mounted(&file));
+
+        mount.umount().expect("unmount must succeed");
+        let mnt = cmd_mount();
+        assert!(
+            !mnt.contains(&*mountpoint.to_string_lossy()),
+            "auto_unmount must not defer the unmount to process exit. Our mountpoint: \
+             {mountpoint:?}\nfuse mounts:\n{mnt}"
+        );
+        ManuallyDrop::into_inner(tmp);
+    }
+
     #[test]
     #[cfg(not(target_os = "macos"))]
     fn mount_unmount() {

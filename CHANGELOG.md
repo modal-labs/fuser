@@ -1,6 +1,12 @@
 # FUSE for Rust - Changelog
 
 ## Unreleased
+* Unmounting from within the mounting process now works with `MountOption::AutoUnmount` (#407).
+  Dropping the `BackgroundSession`, calling `umount_and_join()` or `SessionUnmounter::unmount()`
+  used to leave the unmount to the `fusermount` helper, which only acts once the process exits.
+  Until then the mountpoint was left behind as a dangling "transport endpoint is not connected",
+  and the session kept running. `auto_unmount` remains a safety net for a process that dies
+  without unmounting
 * Fix inverted mounted-check during session teardown: after the filesystem had already been
   unmounted externally, fuser would attempt to unmount the mountpoint again, which could
   unmount an unrelated filesystem mounted at the same path in the meantime
