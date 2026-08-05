@@ -32,7 +32,7 @@ pub const MAX_WRITE_SIZE: usize = 16 * 1024 * 1024;
 const BUFFER_SIZE: usize = MAX_WRITE_SIZE + 4096;
 
 /// Access control policy for filesystem requests.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionACL {
     /// Allow all users.
     All,
@@ -150,46 +150,7 @@ impl<FS: Filesystem> Session<FS> {
     /// having multiple buffers (which take up much memory), but the filesystem methods
     /// may run concurrent by spawning threads.
     pub fn run(&mut self) -> io::Result<()> {
-        // Buffer for receiving requests from the kernel. Only one is allocated and
-        // it is reused immediately after dispatching to conserve memory and allocations.
-        let mut buffer = vec![0; BUFFER_SIZE];
-        loop {
-            // After FUSE_INIT, lower the buffer to the negotiated max_write size before
-            // recomputing the aligned sub-buffer.
-            if self.inner.buffer_size < buffer.len() {
-                buffer.resize(self.inner.buffer_size, 0);
-                buffer.shrink_to_fit();
-            }
-            // Recompute aligned sub-buffer each iteration so we can resize the
-            // buffer after FUSE_INIT negotiation.
-            let buf = aligned_sub_buf(
-                buffer.deref_mut(),
-                std::mem::align_of::<abi::fuse_in_header>(),
-            );
-            // Read the next request from the given channel to kernel driver
-            // The kernel driver makes sure that we get exactly one request per read
-            match self.ch.receive(buf) {
-                Ok(size) => match Request::new(&buf[..size]) {
-                    // Dispatch request
-                    Some(req) => req.dispatch(&mut self.inner, self.ch.sender()),
-                    // Quit loop on illegal request
-                    None => break,
-                },
-                Err(err) => match err.raw_os_error() {
-                    // Operation interrupted. Accordingly to FUSE, this is safe to retry
-                    Some(ENOENT) => continue,
-                    // Interrupted system call, retry
-                    Some(EINTR) => continue,
-                    // Explicitly try again
-                    Some(EAGAIN) => continue,
-                    // Filesystem was unmounted, quit the loop
-                    Some(ENODEV) => break,
-                    // Unhandled error
-                    _ => return Err(err),
-                },
-            }
-        }
-        Ok(())
+        event_loop(&self.ch, &mut self.inner, false)
     }
 
     /// Unmount the filesystem
@@ -209,6 +170,126 @@ impl<FS: Filesystem> Session<FS> {
     pub fn notifier(&self) -> Notifier {
         Notifier::new(self.ch.sender())
     }
+}
+
+impl<FS: Filesystem + Clone + Send + 'static> Session<FS> {
+    /// Run the session with `n_threads` event-loop threads, each reading and
+    /// dispatching kernel requests independently. This parallelizes the
+    /// kernel-to-userspace request path (most importantly the payload copy of
+    /// WRITE requests), which is serialized when a single loop is used.
+    ///
+    /// Requests are processed on a single thread until `FUSE_INIT` completes;
+    /// the remaining event-loop threads are then started with the negotiated
+    /// protocol state. Each thread operates on its own clone of the
+    /// filesystem, so shared state must live behind `Arc`s or similar inside
+    /// the [`Filesystem`] implementation. On drop, `destroy` may be invoked
+    /// once per clone.
+    ///
+    /// If `clone_fd` is true, each additional thread gets its own `/dev/fuse`
+    /// fd via `FUSE_DEV_IOC_CLONE` (Linux 4.5+) for independent kernel-side
+    /// queuing; otherwise all threads share the session fd.
+    pub fn run_mt(&mut self, n_threads: usize, clone_fd: bool) -> io::Result<()> {
+        // Process requests single-threaded until FUSE_INIT completes, so the
+        // worker sessions can copy the negotiated protocol state.
+        event_loop(&self.ch, &mut self.inner, true)?;
+        if !self.inner.initialized {
+            // The kernel closed the session before INIT; nothing more to do.
+            return Ok(());
+        }
+
+        let mut workers: Vec<JoinHandle<io::Result<()>>> = Vec::new();
+        for _ in 1..n_threads {
+            let ch = if clone_fd {
+                #[cfg(target_os = "linux")]
+                {
+                    self.ch.clone_fd()?
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "clone_fd is only supported on Linux",
+                    ));
+                }
+            } else {
+                self.ch.clone()
+            };
+            let mut worker = FilesystemSession {
+                filesystem: self.inner.filesystem.clone(),
+                allowed: self.inner.allowed,
+                session_owner: self.inner.session_owner,
+                proto_major: self.inner.proto_major,
+                proto_minor: self.inner.proto_minor,
+                initialized: true,
+                destroyed: false,
+                buffer_size: self.inner.buffer_size,
+            };
+            workers.push(thread::spawn(move || event_loop(&ch, &mut worker, false)));
+        }
+
+        let result = event_loop(&self.ch, &mut self.inner, false);
+        for worker in workers {
+            match worker.join() {
+                Ok(res) => res?,
+                Err(_) => {
+                    return Err(io::Error::other("FUSE event-loop thread panicked"));
+                }
+            }
+        }
+        result
+    }
+}
+
+/// Read-dispatch loop for a single event-loop thread. If `until_initialized`
+/// is true, the loop returns after `FUSE_INIT` has been processed.
+fn event_loop<FS: Filesystem>(
+    ch: &Channel,
+    se: &mut FilesystemSession<FS>,
+    until_initialized: bool,
+) -> io::Result<()> {
+    // Buffer for receiving requests from the kernel. Only one is allocated and
+    // it is reused immediately after dispatching to conserve memory and allocations.
+    let mut buffer = vec![0; se.buffer_size.min(BUFFER_SIZE)];
+    loop {
+        if until_initialized && se.initialized {
+            break;
+        }
+        // After FUSE_INIT, lower the buffer to the negotiated max_write size before
+        // recomputing the aligned sub-buffer.
+        if se.buffer_size < buffer.len() {
+            buffer.resize(se.buffer_size, 0);
+            buffer.shrink_to_fit();
+        }
+        // Recompute aligned sub-buffer each iteration so we can resize the
+        // buffer after FUSE_INIT negotiation.
+        let buf = aligned_sub_buf(
+            buffer.deref_mut(),
+            std::mem::align_of::<abi::fuse_in_header>(),
+        );
+        // Read the next request from the given channel to kernel driver
+        // The kernel driver makes sure that we get exactly one request per read
+        match ch.receive(buf) {
+            Ok(size) => match Request::new(&buf[..size]) {
+                // Dispatch request
+                Some(req) => req.dispatch(se, ch.sender()),
+                // Quit loop on illegal request
+                None => break,
+            },
+            Err(err) => match err.raw_os_error() {
+                // Operation interrupted. Accordingly to FUSE, this is safe to retry
+                Some(ENOENT) => continue,
+                // Interrupted system call, retry
+                Some(EINTR) => continue,
+                // Explicitly try again
+                Some(EAGAIN) => continue,
+                // Filesystem was unmounted, quit the loop
+                Some(ENODEV) => break,
+                // Unhandled error
+                _ => return Err(err),
+            },
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -238,6 +319,14 @@ impl<FS: 'static + Filesystem + Send> Session<FS> {
     /// Run the session loop in a background thread
     pub fn spawn(self) -> io::Result<BackgroundSession> {
         BackgroundSession::new(self)
+    }
+}
+
+impl<FS: 'static + Filesystem + Clone + Send> Session<FS> {
+    /// Run a multi-threaded session loop (see [`Session::run_mt`]) in
+    /// background threads.
+    pub fn spawn_mt(self, n_threads: usize, clone_fd: bool) -> io::Result<BackgroundSession> {
+        BackgroundSession::new_mt(self, n_threads, clone_fd)
     }
 }
 
@@ -274,6 +363,32 @@ impl BackgroundSession {
         let guard = thread::spawn(move || {
             let mut se = se;
             se.run()
+        });
+        Ok(BackgroundSession {
+            mountpoint,
+            guard,
+            #[cfg(feature = "abi-7-11")]
+            sender,
+            _mount: mount,
+        })
+    }
+
+    /// Like [`BackgroundSession::new`], but runs a multi-threaded session
+    /// loop (see [`Session::run_mt`]).
+    pub fn new_mt<FS: Filesystem + Clone + Send + 'static>(
+        se: Session<FS>,
+        n_threads: usize,
+        clone_fd: bool,
+    ) -> io::Result<BackgroundSession> {
+        let mountpoint = se.mountpoint().to_path_buf();
+        #[cfg(feature = "abi-7-11")]
+        let sender = se.ch.sender();
+        // Take the fuse_session, so that we can unmount it
+        let mount = std::mem::take(&mut *se.mount.lock().unwrap());
+        let mount = mount.ok_or_else(|| io::Error::from_raw_os_error(libc::ENODEV))?;
+        let guard = thread::spawn(move || {
+            let mut se = se;
+            se.run_mt(n_threads, clone_fd)
         });
         Ok(BackgroundSession {
             mountpoint,
