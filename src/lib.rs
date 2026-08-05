@@ -1054,3 +1054,19 @@ pub fn spawn_mount2<'a, FS: Filesystem + Send + 'static + 'a, P: AsRef<Path>>(
     check_option_conflicts(options)?;
     Session::new(filesystem, mountpoint.as_ref(), options).and_then(|se| se.spawn())
 }
+
+/// Like [`spawn_mount2`], but runs `n_threads` event-loop threads that read
+/// and dispatch kernel requests concurrently (see [`Session::run_mt`]). If
+/// `clone_fd` is true, each thread gets its own `/dev/fuse` fd via
+/// `FUSE_DEV_IOC_CLONE` (Linux 4.5+).
+pub fn spawn_mount2_mt<'a, FS: Filesystem + Clone + Send + 'static + 'a, P: AsRef<Path>>(
+    filesystem: FS,
+    mountpoint: P,
+    options: &[MountOption],
+    n_threads: usize,
+    clone_fd: bool,
+) -> io::Result<BackgroundSession> {
+    check_option_conflicts(options)?;
+    Session::new(filesystem, mountpoint.as_ref(), options)
+        .and_then(|se| se.spawn_mt(n_threads, clone_fd))
+}

@@ -1,11 +1,18 @@
 use std::{fs::File, io, os::unix::prelude::AsRawFd, sync::Arc};
 
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::OpenOptionsExt;
+
 use libc::{c_int, c_void, size_t};
 
 use crate::reply::ReplySender;
 
+/// `FUSE_DEV_IOC_CLONE`: `_IOR(229, 0, uint32_t)`.
+#[cfg(target_os = "linux")]
+const FUSE_DEV_IOC_CLONE: libc::c_ulong = 0x8004_E500;
+
 /// A raw communication channel to the FUSE kernel driver
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Channel(Arc<File>);
 
 impl Channel {
@@ -30,6 +37,27 @@ impl Channel {
         } else {
             Ok(rc as usize)
         }
+    }
+
+    /// Clone the FUSE session file descriptor via `FUSE_DEV_IOC_CLONE`,
+    /// returning a new channel with its own `/dev/fuse` fd attached to the
+    /// same session. Each fd has independent kernel-side request queuing,
+    /// which avoids contention when multiple threads read requests.
+    ///
+    /// Requires Linux 4.5+.
+    #[cfg(target_os = "linux")]
+    pub fn clone_fd(&self) -> io::Result<Self> {
+        let clone = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_CLOEXEC)
+            .open("/dev/fuse")?;
+        let source_fd: u32 = self.0.as_raw_fd() as u32;
+        let rc = unsafe { libc::ioctl(clone.as_raw_fd(), FUSE_DEV_IOC_CLONE, &source_fd) };
+        if rc < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self(Arc::new(clone)))
     }
 
     /// Returns a sender object for this channel. The sender object can be
