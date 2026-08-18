@@ -5,9 +5,9 @@ use std::ffi::OsStr;
 use std::io;
 
 use crate::INodeNo;
-use crate::channel::ChannelSender;
 use crate::ll::fuse_abi::fuse_notify_code as notify_code;
 use crate::ll::notify::Notification;
+use crate::reply::ReplySender;
 
 /// A handle to a pending `poll()` request.
 #[derive(Copy, Clone, Debug)]
@@ -22,7 +22,7 @@ pub struct PollNotifier {
 }
 
 impl PollNotifier {
-    pub(crate) fn new(cs: ChannelSender, kh: PollHandle) -> Self {
+    pub(crate) fn new(cs: ReplySender, kh: PollHandle) -> Self {
         Self {
             handle: kh,
             notifier: Notifier::new(cs),
@@ -49,11 +49,14 @@ impl std::fmt::Debug for PollNotifier {
 }
 
 /// A handle by which the application can send notifications to the server
+///
+/// Notifications travel back over whichever transport the session was built on,
+/// so this works for custom transports as well as `/dev/fuse`.
 #[derive(Debug, Clone)]
-pub struct Notifier(ChannelSender);
+pub struct Notifier(ReplySender);
 
 impl Notifier {
-    pub(crate) fn new(cs: ChannelSender) -> Self {
+    pub(crate) fn new(cs: ReplySender) -> Self {
         Self(cs)
     }
 

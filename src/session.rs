@@ -138,6 +138,8 @@ pub struct Session<FS: Filesystem> {
     /// FUSE protocol version, as reported by the kernel.
     /// The field is set to `Some` when the init message is received.
     pub(crate) proto_version: Option<Version>,
+    /// `max_write` agreed during the handshake, used to size event loop read buffers.
+    pub(crate) max_write: u32,
     pub(crate) config: Config,
 }
 
@@ -185,6 +187,7 @@ impl<FS: Filesystem> Session<FS> {
             allowed: options.acl,
             session_owner: geteuid(),
             proto_version: None,
+            max_write: MAX_WRITE_SIZE as u32,
             config: options.clone(),
         };
 
@@ -213,6 +216,7 @@ impl<FS: Filesystem> Session<FS> {
             allowed: acl,
             session_owner: geteuid(),
             proto_version: None,
+            max_write: MAX_WRITE_SIZE as u32,
             config,
         };
 
@@ -251,6 +255,7 @@ impl<FS: Filesystem> Session<FS> {
             allowed,
             session_owner,
             proto_version: _,
+            max_write,
             config,
         } = self;
 
@@ -298,6 +303,7 @@ impl<FS: Filesystem> Session<FS> {
                 ch,
                 allowed,
                 session_owner,
+                max_write,
             };
             threads.push(
                 thread::Builder::new()
@@ -349,131 +355,25 @@ impl<FS: Filesystem> Session<FS> {
                 Err(err) => return Err(err.into()),
             };
 
-            // Parse the request
-            let request = match ll::AnyRequest::try_from(&buf[..size]) {
-                Ok(request) => request,
-                Err(err) => {
-                    error!("{err}");
-                    return Err(io::Error::new(io::ErrorKind::InvalidData, err.to_string()));
-                }
-            };
-
-            // Extract the init operation
-            let op = match request.operation() {
-                Ok(op) => op,
-                Err(_) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "Failed to parse FUSE operation",
-                    ));
-                }
-            };
-
-            let init = match op {
-                ll::Operation::Init(init) => init,
-                _ => {
-                    error!("Received non-init FUSE operation before init: {}", request);
-                    // Send error response and return error - non-init during handshake is invalid
-                    <ReplyRaw as Reply>::new(
-                        request.unique(),
-                        ReplySender::Channel(self.ch.sender()),
-                    )
-                    .send_ll(&ResponseErrno(ll::Errno::EIO));
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "Received non-init FUSE operation during handshake",
-                    ));
-                }
-            };
-
-            let v = init.version();
-            if v.0 > abi::FUSE_KERNEL_VERSION {
-                // Kernel has a newer major version than we support.
-                // Send our version and wait for a second INIT request with a compatible version.
-                debug!(
-                    "INIT: Kernel version {} > our version {}, sending our version and waiting for next init",
-                    v.0,
-                    abi::FUSE_KERNEL_VERSION
-                );
-                let response = init.reply_version_only();
-                <ReplyRaw as Reply>::new(request.unique(), ReplySender::Channel(self.ch.sender()))
-                    .send_ll(&response);
-                continue;
-            }
-
-            // We don't support ABI versions before 7.6
-            if v < Version(7, 6) {
-                error!("Unsupported FUSE ABI version {v}");
-                <ReplyRaw as Reply>::new(request.unique(), ReplySender::Channel(self.ch.sender()))
-                    .send_ll(&ResponseErrno(ll::Errno::EPROTO));
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    format!("Unsupported FUSE ABI version {v}"),
-                ));
-            }
-
-            let mut config = KernelConfig::new(init.capabilities(), init.max_readahead(), v);
-
-            // Call filesystem init method and give it a chance to return an error
+            let sender = ReplySender::channel(self.ch.sender());
             let Some(filesystem) = &mut self.filesystem.fs else {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "Bug: filesystem must be initialized during handshake",
                 ));
             };
-            let res = filesystem.init(Request::ref_cast(request.header()), &mut config);
-            if let Err(error) = res {
-                let errno = Errno::from_i32(error.raw_os_error().unwrap_or(0));
-                <ReplyRaw as Reply>::new(request.unique(), ReplySender::Channel(self.ch.sender()))
-                    .send_ll(&ResponseErrno(errno));
-                return Err(error);
-            }
 
-            // Remember the ABI version supported by kernel and mark the session initialized.
-            self.proto_version = Some(v);
-
-            // Log capability status for debugging
-            for bit in 0..64 {
-                let bitflags = InitFlags::from_bits_retain(1 << bit);
-                if bitflags == InitFlags::FUSE_INIT_EXT {
-                    continue;
-                }
-                let bitflag_is_known = InitFlags::all().contains(bitflags);
-                let kernel_supports = init.capabilities().contains(bitflags);
-                let we_requested = config.requested.contains(bitflags);
-                // On macOS, there's a clash between linux and macOS constants,
-                // so we pick macOS ones (last).
-                let name = if let Some((name, _)) = bitflags.iter_names().last() {
-                    Cow::Borrowed(name)
-                } else {
-                    Cow::Owned(format!("(1 << {bit})"))
-                };
-                if we_requested && kernel_supports {
-                    debug!("capability {name} enabled")
-                } else if we_requested {
-                    debug!("capability {name} not supported by kernel")
-                } else if kernel_supports {
-                    debug!("capability {name} not requested by client")
-                } else if bitflag_is_known {
-                    debug!("capability {name} not supported nor requested")
+            match handshake_request(filesystem, sender, &buf[..size])? {
+                HandshakeOutcome::NeedAnotherInit => continue,
+                HandshakeOutcome::Complete {
+                    proto_version,
+                    max_write,
+                } => {
+                    self.proto_version = Some(proto_version);
+                    self.max_write = max_write;
+                    return Ok(());
                 }
             }
-
-            // Reply with our desired version and settings.
-            debug!(
-                "INIT response: ABI {}.{}, flags {:#x}, max readahead {}, max write {}",
-                abi::FUSE_KERNEL_VERSION,
-                abi::FUSE_KERNEL_MINOR_VERSION,
-                init.capabilities() & config.requested,
-                config.max_readahead,
-                config.max_write
-            );
-
-            let response = init.reply(&config);
-            <ReplyRaw as Reply>::new(request.unique(), ReplySender::Channel(self.ch.sender()))
-                .send_ll(&response);
-
-            return Ok(());
         }
     }
 
@@ -491,7 +391,7 @@ impl<FS: Filesystem> Session<FS> {
 
     /// Returns an object that can be used to send notifications to the kernel
     pub fn notifier(&self) -> Notifier {
-        Notifier::new(self.ch.sender())
+        Notifier::new(ReplySender::channel(self.ch.sender()))
     }
 }
 
@@ -511,6 +411,158 @@ impl SessionUnmounter {
     }
 }
 
+/// What [`handshake_request`] concluded from an init message.
+#[derive(Debug, Clone, Copy)]
+pub enum HandshakeOutcome {
+    /// The handshake finished; the filesystem may now serve requests.
+    Complete {
+        /// Protocol version the kernel and the filesystem settled on.
+        proto_version: Version,
+        /// Largest write the kernel will send, useful for sizing read buffers.
+        max_write: u32,
+    },
+    /// The kernel speaks a newer major version than this crate does and has been
+    /// told which version we support; it will send another init message.
+    NeedAnotherInit,
+}
+
+/// Complete the FUSE_INIT handshake over a transport of your own.
+///
+/// Pass the raw bytes of an init message; the reply is written to `sender`. Once
+/// this returns [`HandshakeOutcome::Complete`], subsequent requests can be served
+/// with [`RequestWithSender::dispatch`].
+pub fn handshake_request<FS: Filesystem>(
+    filesystem: &mut FS,
+    sender: ReplySender,
+    data: &[u8],
+) -> io::Result<HandshakeOutcome> {
+    let request = match ll::AnyRequest::try_from(data) {
+        Ok(request) => request,
+        Err(err) => {
+            error!("{err}");
+            return Err(io::Error::new(io::ErrorKind::InvalidData, err.to_string()));
+        }
+    };
+
+    let Ok(op) = request.operation() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Failed to parse FUSE operation",
+        ));
+    };
+
+    let init = match op {
+        ll::Operation::Init(init) => init,
+        _ => {
+            error!("Received non-init FUSE operation before init: {}", request);
+            <ReplyRaw as Reply>::new(request.unique(), sender)
+                .send_ll(&ResponseErrno(ll::Errno::EIO));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Received non-init FUSE operation during handshake",
+            ));
+        }
+    };
+
+    let v = init.version();
+    if v.0 > abi::FUSE_KERNEL_VERSION {
+        // Kernel has a newer major version than we support.
+        // Send our version and wait for a second INIT request with a compatible version.
+        debug!(
+            "INIT: Kernel version {} > our version {}, sending our version and waiting for next init",
+            v.0,
+            abi::FUSE_KERNEL_VERSION
+        );
+        let response = init.reply_version_only();
+        <ReplyRaw as Reply>::new(request.unique(), sender).send_ll(&response);
+        return Ok(HandshakeOutcome::NeedAnotherInit);
+    }
+
+    // We don't support ABI versions before 7.6
+    if v < Version(7, 6) {
+        error!("Unsupported FUSE ABI version {v}");
+        <ReplyRaw as Reply>::new(request.unique(), sender)
+            .send_ll(&ResponseErrno(ll::Errno::EPROTO));
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("Unsupported FUSE ABI version {v}"),
+        ));
+    }
+
+    let mut config = KernelConfig::new(init.capabilities(), init.max_readahead(), v);
+
+    // Call filesystem init method and give it a chance to return an error
+    if let Err(error) = filesystem.init(Request::ref_cast(request.header()), &mut config) {
+        let errno = Errno::from_i32(error.raw_os_error().unwrap_or(0));
+        <ReplyRaw as Reply>::new(request.unique(), sender).send_ll(&ResponseErrno(errno));
+        return Err(error);
+    }
+
+    // Log capability status for debugging
+    for bit in 0..64 {
+        let bitflags = InitFlags::from_bits_retain(1 << bit);
+        if bitflags == InitFlags::FUSE_INIT_EXT {
+            continue;
+        }
+        let bitflag_is_known = InitFlags::all().contains(bitflags);
+        let kernel_supports = init.capabilities().contains(bitflags);
+        let we_requested = config.requested.contains(bitflags);
+        // On macOS, there's a clash between linux and macOS constants,
+        // so we pick macOS ones (last).
+        let name = if let Some((name, _)) = bitflags.iter_names().last() {
+            Cow::Borrowed(name)
+        } else {
+            Cow::Owned(format!("(1 << {bit})"))
+        };
+        if we_requested && kernel_supports {
+            debug!("capability {name} enabled")
+        } else if we_requested {
+            debug!("capability {name} not supported by kernel")
+        } else if kernel_supports {
+            debug!("capability {name} not requested by client")
+        } else if bitflag_is_known {
+            debug!("capability {name} not supported nor requested")
+        }
+    }
+
+    // Reply with our desired version and settings.
+    debug!(
+        "INIT response: ABI {}.{}, flags {:#x}, max readahead {}, max write {}",
+        abi::FUSE_KERNEL_VERSION,
+        abi::FUSE_KERNEL_MINOR_VERSION,
+        init.capabilities() & config.requested,
+        config.max_readahead,
+        config.max_write
+    );
+
+    let max_write = config.max_write;
+    let response = init.reply(&config);
+    <ReplyRaw as Reply>::new(request.unique(), sender).send_ll(&response);
+
+    Ok(HandshakeOutcome::Complete {
+        proto_version: v,
+        max_write,
+    })
+}
+
+/// Everything [`RequestWithSender::dispatch`] needs in order to serve a request,
+/// independent of how requests arrive or replies are sent.
+///
+/// Build one of these to drive a [`Filesystem`] over a transport other than
+/// `/dev/fuse`. Note that the FUSE_INIT handshake must be completed first, via
+/// [`handshake_request`], since `dispatch` rejects init messages.
+#[derive(Debug)]
+pub struct DispatchContext<'a, FS: Filesystem> {
+    /// The filesystem serving requests.
+    pub filesystem: &'a FS,
+    /// Which callers are permitted to issue requests.
+    pub allowed: SessionACL,
+    /// User that owns the session.
+    pub session_owner: Uid,
+    /// Name used to identify this event loop in log messages.
+    pub thread_name: &'a str,
+}
+
 pub(crate) struct SessionEventLoop<FS: Filesystem> {
     /// Cache thread name for faster `debug!`.
     pub(crate) thread_name: String,
@@ -518,26 +570,45 @@ pub(crate) struct SessionEventLoop<FS: Filesystem> {
     pub(crate) filesystem: Arc<FilesystemHolder<FS>>,
     pub(crate) allowed: SessionACL,
     pub(crate) session_owner: Uid,
+    /// `max_write` negotiated during the handshake, used to size the read buffer.
+    pub(crate) max_write: u32,
 }
 
 impl<FS: Filesystem> SessionEventLoop<FS> {
     fn event_loop(&self) -> io::Result<()> {
+        let Some(filesystem) = &self.filesystem.fs else {
+            return Err(io::Error::other(
+                "bug: filesystem must be initialized before the event loop",
+            ));
+        };
+        let cx = DispatchContext {
+            filesystem,
+            allowed: self.allowed,
+            session_owner: self.session_owner,
+            thread_name: &self.thread_name,
+        };
+
         // Buffer for receiving requests from the kernel. Only one is allocated and
         // it is reused immediately after dispatching to conserve memory and allocations.
-        let mut buf = FuseReadBuf::new();
+        // Sized to the write ceiling the kernel actually agreed to, which is often far
+        // below the protocol maximum and is paid for per event loop thread.
+        let mut buf = FuseReadBuf::for_max_write(self.max_write);
         let buf = buf.as_mut();
         loop {
             // Read the next request from the given channel to kernel driver
             // The kernel driver makes sure that we get exactly one request per read
             match self.ch.receive_retrying(buf) {
-                Ok(size) => match RequestWithSender::new(self.ch.sender(), &buf[..size]) {
+                Ok(size) => match RequestWithSender::new(
+                    ReplySender::channel(self.ch.sender()),
+                    &buf[..size],
+                ) {
                     // Dispatch request
                     Some(req) => {
                         if let Ok(Operation::Destroy(_)) = req.request.operation() {
                             req.reply::<ReplyEmpty>().ok();
                             return Ok(());
                         } else {
-                            req.dispatch(self)
+                            req.dispatch(&cx)
                         }
                     }
                     // Quit loop on illegal request
@@ -577,7 +648,7 @@ impl BackgroundSession {
 
     /// Returns an object that can be used to send notifications to the kernel
     pub fn notifier(&self) -> Notifier {
-        Notifier::new(self.sender.clone())
+        Notifier::new(ReplySender::channel(self.sender.clone()))
     }
 
     /// Join the filesystem thread.

@@ -15,7 +15,6 @@ use crate::Filesystem;
 use crate::PollNotifier;
 use crate::RenameFlags;
 use crate::Request;
-use crate::channel::ChannelSender;
 use crate::forget_one::ForgetOne;
 use crate::ll;
 use crate::ll::Errno;
@@ -26,21 +25,26 @@ use crate::reply::ReplyDirectory;
 use crate::reply::ReplyDirectoryPlus;
 use crate::reply::ReplyRaw;
 use crate::reply::ReplySender;
+use crate::session::DispatchContext;
 use crate::session::SessionACL;
-use crate::session::SessionEventLoop;
 
-/// Request data structure
+/// A parsed FUSE request paired with the transport its reply goes back on.
+///
+/// Construct one from raw request bytes to drive a [`Filesystem`] over a
+/// transport of your own; see [`DispatchContext`].
 #[derive(Debug)]
-pub(crate) struct RequestWithSender<'a> {
-    /// Channel sender for sending the reply
-    ch: ChannelSender,
+pub struct RequestWithSender<'a> {
+    /// Transport the reply is sent on
+    sender: ReplySender,
     /// Parsed request
     pub(crate) request: ll::AnyRequest<'a>,
 }
 
 impl<'a> RequestWithSender<'a> {
     /// Create a new request from the given data
-    pub(crate) fn new(ch: ChannelSender, data: &'a [u8]) -> Option<RequestWithSender<'a>> {
+    ///
+    /// Returns `None` if the bytes are not a well-formed FUSE request.
+    pub fn new(sender: ReplySender, data: &'a [u8]) -> Option<RequestWithSender<'a>> {
         let request = match ll::AnyRequest::try_from(data) {
             Ok(request) => request,
             Err(err) => {
@@ -49,13 +53,13 @@ impl<'a> RequestWithSender<'a> {
             }
         };
 
-        Some(Self { ch, request })
+        Some(Self { sender, request })
     }
 
     /// Dispatch request to the given filesystem.
     /// This calls the appropriate filesystem operation method for the
     /// request and sends back the returned reply to the kernel
-    pub(crate) fn dispatch<FS: Filesystem>(&self, se: &SessionEventLoop<FS>) {
+    pub fn dispatch<FS: Filesystem>(&self, se: &DispatchContext<'_, FS>) {
         debug!("{} thread={}", self.request, se.thread_name);
         match self.dispatch_req(se) {
             Ok(Some(resp)) => self.reply::<ReplyRaw>().send_ll(&resp),
@@ -66,7 +70,7 @@ impl<'a> RequestWithSender<'a> {
 
     fn dispatch_req<FS: Filesystem>(
         &self,
-        se: &SessionEventLoop<FS>,
+        se: &DispatchContext<'_, FS>,
     ) -> Result<Option<ResponseData>, Errno> {
         let op = self.request.operation().map_err(|_| Errno::ENOSYS)?;
         // Implement allow_root & access check for auto_unmount
@@ -97,11 +101,7 @@ impl<'a> RequestWithSender<'a> {
             }
         }
 
-        let Some(filesystem) = &se.filesystem.fs else {
-            // This is handled before dispatch call.
-            error!("bug: filesystem must be initialized in dispatch_req");
-            return Err(Errno::EIO);
-        };
+        let filesystem = se.filesystem;
 
         match op {
             // Filesystem initialization - should not happen after handshake completed
@@ -304,7 +304,7 @@ impl<'a> RequestWithSender<'a> {
                     x.offset(),
                     ReplyDirectory::new(
                         self.request.unique(),
-                        ReplySender::Channel(self.ch.clone()),
+                        self.sender.clone(),
                         x.size() as usize,
                     ),
                 );
@@ -438,7 +438,7 @@ impl<'a> RequestWithSender<'a> {
                 );
             }
             ll::Operation::Poll(x) => {
-                let ph = PollNotifier::new(se.ch.sender(), x.kernel_handle());
+                let ph = PollNotifier::new(self.sender.clone(), x.kernel_handle());
 
                 filesystem.poll(
                     self.request_header(),
@@ -479,7 +479,7 @@ impl<'a> RequestWithSender<'a> {
                     x.offset(),
                     ReplyDirectoryPlus::new(
                         self.request.unique(),
-                        ReplySender::Channel(self.ch.clone()),
+                        self.sender.clone(),
                         x.size() as usize,
                     ),
                 );
@@ -552,7 +552,7 @@ impl<'a> RequestWithSender<'a> {
     /// Create a reply object for this request that can be passed to the filesystem
     /// implementation and makes sure that a request is replied exactly once
     pub(crate) fn reply<T: Reply>(&self) -> T {
-        Reply::new(self.request.unique(), ReplySender::Channel(self.ch.clone()))
+        Reply::new(self.request.unique(), self.sender.clone())
     }
 
     /// Returns a Request reference for this request

@@ -8,8 +8,10 @@
 
 use std::convert::AsRef;
 use std::ffi::OsStr;
+use std::fmt;
 use std::io::IoSlice;
 use std::os::fd::BorrowedFd;
+use std::sync::Arc;
 use std::time::Duration;
 #[cfg(target_os = "macos")]
 use std::time::SystemTime;
@@ -34,25 +36,83 @@ use crate::ll::reply::Response;
 use crate::ll::{self};
 use crate::passthrough::BackingId;
 
+/// A transport that carries FUSE replies back to whoever issued the request.
+///
+/// Implementing this allows a [`Filesystem`](crate::Filesystem) to be driven over
+/// something other than `/dev/fuse` — a virtiofs virtqueue, for instance — by
+/// pairing it with [`Request::dispatch`](crate::Request::dispatch).
+pub trait CustomReplySender: Send + Sync + 'static {
+    /// Send reply data.
+    fn send(&self, data: &[IoSlice<'_>]) -> std::io::Result<()>;
+
+    /// Register a backing file for passthrough reads and writes.
+    ///
+    /// Transports that cannot support passthrough leave this unimplemented; the
+    /// kernel only asks for it when the filesystem negotiated the capability.
+    fn open_backing(&self, _fd: BorrowedFd<'_>) -> std::io::Result<BackingId> {
+        Err(std::io::Error::from_raw_os_error(libc::ENOSYS))
+    }
+}
+
 /// Generic reply callback to send data
-#[derive(Debug)]
-pub(crate) enum ReplySender {
+///
+/// A session over `/dev/fuse` builds these itself; use [`ReplySender::custom`] to
+/// reply over a transport of your own.
+#[derive(Debug, Clone)]
+pub struct ReplySender(ReplySenderKind);
+
+#[derive(Clone)]
+enum ReplySenderKind {
     Channel(ChannelSender),
+    Custom(Arc<dyn CustomReplySender>),
     #[cfg(test)]
     Assert(AssertSender),
     #[cfg(test)]
     Sync(std::sync::mpsc::SyncSender<()>),
 }
 
+impl fmt::Debug for ReplySenderKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ReplySenderKind::Channel(sender) => f.debug_tuple("Channel").field(sender).finish(),
+            ReplySenderKind::Custom(_) => f.debug_tuple("Custom").finish(),
+            #[cfg(test)]
+            ReplySenderKind::Assert(sender) => f.debug_tuple("Assert").field(sender).finish(),
+            #[cfg(test)]
+            ReplySenderKind::Sync(_) => f.debug_tuple("Sync").finish(),
+        }
+    }
+}
+
 impl ReplySender {
+    /// Reply over a caller-supplied transport.
+    pub fn custom(sender: Arc<dyn CustomReplySender>) -> Self {
+        Self(ReplySenderKind::Custom(sender))
+    }
+
+    pub(crate) fn channel(sender: ChannelSender) -> Self {
+        Self(ReplySenderKind::Channel(sender))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn assert(sender: AssertSender) -> Self {
+        Self(ReplySenderKind::Assert(sender))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sync(sender: std::sync::mpsc::SyncSender<()>) -> Self {
+        Self(ReplySenderKind::Sync(sender))
+    }
+
     /// Send data.
     pub(crate) fn send(&self, data: &[IoSlice<'_>]) -> std::io::Result<()> {
-        match self {
-            ReplySender::Channel(sender) => sender.send(data),
+        match &self.0 {
+            ReplySenderKind::Channel(sender) => sender.send(data),
+            ReplySenderKind::Custom(sender) => sender.send(data),
             #[cfg(test)]
-            ReplySender::Assert(sender) => sender.send(data),
+            ReplySenderKind::Assert(sender) => sender.send(data),
             #[cfg(test)]
-            ReplySender::Sync(sender) => {
+            ReplySenderKind::Sync(sender) => {
                 sender.send(()).unwrap();
                 Ok(())
             }
@@ -61,29 +121,33 @@ impl ReplySender {
 
     /// Open a backing file
     pub(crate) fn open_backing(&self, fd: BorrowedFd<'_>) -> std::io::Result<BackingId> {
-        match self {
-            ReplySender::Channel(sender) => sender.open_backing(fd),
+        match &self.0 {
+            ReplySenderKind::Channel(sender) => sender.open_backing(fd),
+            ReplySenderKind::Custom(sender) => sender.open_backing(fd),
             #[cfg(test)]
-            ReplySender::Assert(_) => unreachable!(),
+            ReplySenderKind::Assert(_) => unreachable!(),
             #[cfg(test)]
-            ReplySender::Sync(_) => unreachable!(),
+            ReplySenderKind::Sync(_) => unreachable!(),
         }
     }
 
     /// Wraps a raw backing file ID
     pub(crate) unsafe fn wrap_backing(&self, id: u32) -> BackingId {
-        match self {
-            ReplySender::Channel(sender) => unsafe { sender.wrap_backing(id) },
+        match &self.0 {
+            ReplySenderKind::Channel(sender) => unsafe { sender.wrap_backing(id) },
+            // Only reachable by way of `open_backing`, which custom transports
+            // reject unless they have opted into passthrough.
+            ReplySenderKind::Custom(_) => unreachable!("passthrough on a custom transport"),
             #[cfg(test)]
-            ReplySender::Assert(_) => unreachable!(),
+            ReplySenderKind::Assert(_) => unreachable!(),
             #[cfg(test)]
-            ReplySender::Sync(_) => unreachable!(),
+            ReplySenderKind::Sync(_) => unreachable!(),
         }
     }
 }
 
 #[cfg(test)]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct AssertSender {
     expected: Vec<u8>,
 }
@@ -905,7 +969,7 @@ mod test {
             b: 0x34,
             c: 0x5678,
         };
-        let sender = ReplySender::Assert(AssertSender {
+        let sender = ReplySender::assert(AssertSender {
             expected: vec![
                 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xef, 0xbe, 0xad, 0xde, 0x00, 0x00,
                 0x00, 0x00, 0x12, 0x34, 0x78, 0x56,
@@ -917,7 +981,7 @@ mod test {
 
     #[test]
     fn reply_error() {
-        let sender = ReplySender::Assert(AssertSender {
+        let sender = ReplySender::assert(AssertSender {
             expected: vec![
                 0x10, 0x00, 0x00, 0x00, 0xbe, 0xff, 0xff, 0xff, 0xef, 0xbe, 0xad, 0xde, 0x00, 0x00,
                 0x00, 0x00,
@@ -929,7 +993,7 @@ mod test {
 
     #[test]
     fn reply_empty() {
-        let sender = ReplySender::Assert(AssertSender {
+        let sender = ReplySender::assert(AssertSender {
             expected: vec![
                 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xef, 0xbe, 0xad, 0xde, 0x00, 0x00,
                 0x00, 0x00,
@@ -941,7 +1005,7 @@ mod test {
 
     #[test]
     fn reply_data() {
-        let sender = ReplySender::Assert(AssertSender {
+        let sender = ReplySender::assert(AssertSender {
             expected: vec![
                 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xef, 0xbe, 0xad, 0xde, 0x00, 0x00,
                 0x00, 0x00, 0xde, 0xad, 0xbe, 0xef,
@@ -985,7 +1049,7 @@ mod test {
         expected.extend(vec![0xbb, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
         expected[0] = (expected.len()) as u8;
 
-        let sender = ReplySender::Assert(AssertSender { expected });
+        let sender = ReplySender::assert(AssertSender { expected });
         let reply: ReplyEntry = Reply::new(ll::RequestId(0xdeadbeef), sender);
         let time = UNIX_EPOCH + Duration::new(0x1234, 0x5678);
         let ttl = Duration::new(0x8765, 0x4321);
@@ -1040,7 +1104,7 @@ mod test {
         expected.extend_from_slice(&[0xbb, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
         expected[0] = expected.len() as u8;
 
-        let sender = ReplySender::Assert(AssertSender { expected });
+        let sender = ReplySender::assert(AssertSender { expected });
         let reply: ReplyAttr = Reply::new(ll::RequestId(0xdeadbeef), sender);
         let time = UNIX_EPOCH + Duration::new(0x1234, 0x5678);
         let ttl = Duration::new(0x8765, 0x4321);
@@ -1067,7 +1131,7 @@ mod test {
     #[test]
     #[cfg(target_os = "macos")]
     fn reply_xtimes() {
-        let sender = ReplySender::Assert(AssertSender {
+        let sender = ReplySender::assert(AssertSender {
             expected: vec![
                 0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xef, 0xbe, 0xad, 0xde, 0x00, 0x00,
                 0x00, 0x00, 0x34, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x34, 0x12, 0x00, 0x00,
@@ -1081,7 +1145,7 @@ mod test {
 
     #[test]
     fn reply_open() {
-        let sender = ReplySender::Assert(AssertSender {
+        let sender = ReplySender::assert(AssertSender {
             expected: vec![
                 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xef, 0xbe, 0xad, 0xde, 0x00, 0x00,
                 0x00, 0x00, 0x22, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x33, 0x00, 0x00, 0x00,
@@ -1094,7 +1158,7 @@ mod test {
 
     #[test]
     fn reply_write() {
-        let sender = ReplySender::Assert(AssertSender {
+        let sender = ReplySender::assert(AssertSender {
             expected: vec![
                 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xef, 0xbe, 0xad, 0xde, 0x00, 0x00,
                 0x00, 0x00, 0x22, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -1106,7 +1170,7 @@ mod test {
 
     #[test]
     fn reply_statfs() {
-        let sender = ReplySender::Assert(AssertSender {
+        let sender = ReplySender::assert(AssertSender {
             expected: vec![
                 0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xef, 0xbe, 0xad, 0xde, 0x00, 0x00,
                 0x00, 0x00, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x22, 0x00, 0x00, 0x00,
@@ -1161,7 +1225,7 @@ mod test {
         );
         expected[0] = (expected.len()) as u8;
 
-        let sender = ReplySender::Assert(AssertSender { expected });
+        let sender = ReplySender::assert(AssertSender { expected });
         let reply: ReplyCreate = Reply::new(ll::RequestId(0xdeadbeef), sender);
         let time = UNIX_EPOCH + Duration::new(0x1234, 0x5678);
         let ttl = Duration::new(0x8765, 0x4321);
@@ -1193,7 +1257,7 @@ mod test {
 
     #[test]
     fn reply_lock() {
-        let sender = ReplySender::Assert(AssertSender {
+        let sender = ReplySender::assert(AssertSender {
             expected: vec![
                 0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xef, 0xbe, 0xad, 0xde, 0x00, 0x00,
                 0x00, 0x00, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x22, 0x00, 0x00, 0x00,
@@ -1206,7 +1270,7 @@ mod test {
 
     #[test]
     fn reply_bmap() {
-        let sender = ReplySender::Assert(AssertSender {
+        let sender = ReplySender::assert(AssertSender {
             expected: vec![
                 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xef, 0xbe, 0xad, 0xde, 0x00, 0x00,
                 0x00, 0x00, 0x34, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -1218,7 +1282,7 @@ mod test {
 
     #[test]
     fn reply_directory() {
-        let sender = ReplySender::Assert(AssertSender {
+        let sender = ReplySender::assert(AssertSender {
             expected: vec![
                 0x50, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xef, 0xbe, 0xad, 0xde, 0x00, 0x00,
                 0x00, 0x00, 0xbb, 0xaa, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
@@ -1236,7 +1300,7 @@ mod test {
 
     #[test]
     fn reply_xattr_size() {
-        let sender = ReplySender::Assert(AssertSender {
+        let sender = ReplySender::assert(AssertSender {
             expected: vec![
                 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xEF, 0xBE, 0xAD, 0xDE, 0x00, 0x00,
                 0x00, 0x00, 0x78, 0x56, 0x34, 0x12, 0x00, 0x00, 0x00, 0x00,
@@ -1248,7 +1312,7 @@ mod test {
 
     #[test]
     fn reply_xattr_data() {
-        let sender = ReplySender::Assert(AssertSender {
+        let sender = ReplySender::assert(AssertSender {
             expected: vec![
                 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xEF, 0xBE, 0xAD, 0xDE, 0x00, 0x00,
                 0x00, 0x00, 0x11, 0x22, 0x33, 0x44,
@@ -1261,7 +1325,7 @@ mod test {
     #[test]
     fn async_reply() {
         let (tx, rx) = sync_channel::<()>(1);
-        let reply: ReplyEmpty = Reply::new(ll::RequestId(0xdeadbeef), ReplySender::Sync(tx));
+        let reply: ReplyEmpty = Reply::new(ll::RequestId(0xdeadbeef), ReplySender::sync(tx));
         thread::spawn(move || {
             reply.ok();
         });

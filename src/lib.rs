@@ -31,7 +31,7 @@ use serde::Serialize;
 
 pub use crate::access_flags::AccessFlags;
 pub use crate::bsd_file_flags::BsdFileFlags;
-use crate::forget_one::ForgetOne;
+pub use crate::forget_one::ForgetOne;
 pub use crate::ll::Errno;
 pub use crate::ll::Generation;
 pub use crate::ll::RequestId;
@@ -57,6 +57,7 @@ pub use crate::open_flags::OpenFlags;
 pub use crate::passthrough::BackingId;
 pub use crate::poll_events::PollEvents;
 pub use crate::rename_flags::RenameFlags;
+pub use crate::reply::CustomReplySender;
 pub use crate::reply::ReplyAttr;
 pub use crate::reply::ReplyBmap;
 pub use crate::reply::ReplyCreate;
@@ -70,15 +71,23 @@ pub use crate::reply::ReplyLock;
 pub use crate::reply::ReplyLseek;
 pub use crate::reply::ReplyOpen;
 pub use crate::reply::ReplyPoll;
+pub use crate::reply::ReplySender;
 pub use crate::reply::ReplyStatfs;
 pub use crate::reply::ReplyWrite;
 pub use crate::reply::ReplyXattr;
+pub use crate::request::RequestWithSender;
 pub use crate::request_param::Request;
 pub use crate::session::BackgroundSession;
+pub use crate::session::DispatchContext;
+pub use crate::session::HandshakeOutcome;
 use crate::session::MAX_WRITE_SIZE;
 pub use crate::session::Session;
 pub use crate::session::SessionACL;
 pub use crate::session::SessionUnmounter;
+// Re-exported so that callers building a `DispatchContext` need not depend on a
+// matching version of nix themselves.
+pub use nix::unistd::Uid;
+pub use crate::session::handshake_request;
 
 mod access_flags;
 mod bsd_file_flags;

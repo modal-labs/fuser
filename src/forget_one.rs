@@ -13,6 +13,16 @@ pub struct ForgetOne {
 }
 
 impl ForgetOne {
+    /// Build a forget entry, for filesystems that adapt or forward requests.
+    pub fn new(nodeid: INodeNo, nlookup: u64) -> Self {
+        Self {
+            forget_one: fuse_forget_one {
+                nodeid: nodeid.0,
+                nlookup,
+            },
+        }
+    }
+
     /// Inode number.
     pub fn nodeid(&self) -> INodeNo {
         INodeNo(self.forget_one.nodeid)
