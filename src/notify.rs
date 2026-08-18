@@ -3,8 +3,9 @@ use std::io;
 #[allow(unused)]
 use std::{convert::TryInto, ffi::OsStr};
 
+use std::sync::Arc;
+
 use crate::{
-    channel::ChannelSender,
     ll::{fuse_abi::fuse_notify_code as notify_code, notify::Notification},
 
     // What we're sending here aren't really replies, but they
@@ -22,7 +23,7 @@ pub struct PollHandle {
 }
 
 impl PollHandle {
-    pub(crate) fn new(cs: ChannelSender, kh: u64) -> Self {
+    pub(crate) fn new(cs: Arc<dyn ReplySender>, kh: u64) -> Self {
         Self {
             handle: kh,
             notifier: Notifier::new(cs),
@@ -48,11 +49,20 @@ impl std::fmt::Debug for PollHandle {
 }
 
 /// A handle by which the application can send notifications to the server
-#[derive(Debug, Clone)]
-pub struct Notifier(ChannelSender);
+///
+/// The sender is type-erased so that notifications work regardless of the
+/// transport carrying FUSE messages, not just `/dev/fuse`.
+#[derive(Clone)]
+pub struct Notifier(Arc<dyn ReplySender>);
+
+impl std::fmt::Debug for Notifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Notifier").finish()
+    }
+}
 
 impl Notifier {
-    pub(crate) fn new(cs: ChannelSender) -> Self {
+    pub(crate) fn new(cs: Arc<dyn ReplySender>) -> Self {
         Self(cs)
     }
 
