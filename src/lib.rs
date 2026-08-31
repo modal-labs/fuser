@@ -86,8 +86,8 @@ pub use crate::session::SessionACL;
 pub use crate::session::SessionUnmounter;
 // Re-exported so that callers building a `DispatchContext` need not depend on a
 // matching version of nix themselves.
-pub use nix::unistd::Uid;
 pub use crate::session::handshake_request;
+pub use nix::unistd::Uid;
 
 mod access_flags;
 mod bsd_file_flags;
@@ -778,6 +778,22 @@ pub trait Filesystem: Send + Sync + 'static {
         reply: ReplyEmpty,
     ) {
         warn!("[Not Implemented] fsyncdir(ino: {ino:#x?}, fh: {fh}, datasync: {datasync})");
+        reply.error(Errno::ENOSYS);
+    }
+
+    /// Synchronize the filesystem, in response to `syncfs(2)`.
+    ///
+    /// Only sent for mounts whose connection the kernel has enabled it for,
+    /// which is virtiofs and, since Linux 6.18, the `fuseblk` filesystem type.
+    /// The kernel submits all dirty pages and waits for the corresponding
+    /// writes to be replied to before sending this request, so a filesystem
+    /// that persists data as part of handling writes has nothing further to do
+    /// here.
+    ///
+    /// Replying with `ENOSYS` makes the kernel stop sending this request, which
+    /// also disables the wait described above.
+    fn syncfs(&self, _req: &Request, ino: INodeNo, reply: ReplyEmpty) {
+        warn!("[Not Implemented] syncfs(ino: {ino:#x?})");
         reply.error(Errno::ENOSYS);
     }
 
