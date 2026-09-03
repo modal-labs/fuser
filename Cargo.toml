@@ -88,3 +88,6 @@ name = "passthrough"
 
 [[example]]
 name = "passthrough_fork"
+
+[[example]]
+name = "syncfs"

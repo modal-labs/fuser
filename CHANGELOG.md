@@ -1,6 +1,9 @@
 # FUSE for Rust - Changelog
 
 ## Unreleased
+* Add `Filesystem::syncfs()`, the `FUSE_SYNCFS` request the kernel sends on `syncfs(2)`. A
+  filesystem that does not implement it replies `ENOSYS`, which makes the kernel stop sending it
+  and stop waiting for in-flight writes before future `syncfs(2)` calls
 * Unmounting from within the mounting process now works with `MountOption::AutoUnmount` (#407).
   Dropping the `BackgroundSession`, calling `umount_and_join()` or `SessionUnmounter::unmount()`
   used to leave the unmount to the `fusermount` helper, which only acts once the process exits.

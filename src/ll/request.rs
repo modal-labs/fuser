@@ -1521,6 +1521,22 @@ mod op {
         }
     }
 
+    /// Synchronize the filesystem, in response to `syncfs(2)`.
+    ///
+    /// Only sent for mounts whose connection the kernel has enabled it for,
+    /// which is virtiofs and, since Linux 6.18, the `fuseblk` filesystem type.
+    /// The kernel has already submitted all dirty pages and waited for the
+    /// writes to be acknowledged by the time this request arrives, so a
+    /// filesystem that persists data on write completion has nothing left to
+    /// do.
+    #[derive(Debug)]
+    pub(crate) struct SyncFs<'a> {
+        #[expect(dead_code)]
+        header: &'a fuse_in_header,
+        #[expect(dead_code)]
+        arg: &'a fuse_syncfs_in,
+    }
+
     /// Copy the specified range from the source inode to the destination inode
     #[derive(Debug, Clone, Copy)]
     pub(crate) struct CopyFileRangeFile {
@@ -1852,6 +1868,10 @@ mod op {
                 header,
                 arg: data.fetch()?,
             }),
+            fuse_opcode::FUSE_SYNCFS => Operation::SyncFs(SyncFs {
+                header,
+                arg: data.fetch()?,
+            }),
 
             #[cfg(target_os = "macos")]
             fuse_opcode::FUSE_SETVOLNAME => Operation::SetVolName(SetVolName {
@@ -1926,6 +1946,7 @@ pub(crate) enum Operation<'a> {
     Rename2(Rename2<'a>),
     Lseek(Lseek<'a>),
     CopyFileRange(CopyFileRange<'a>),
+    SyncFs(#[expect(dead_code)] SyncFs<'a>),
 
     #[cfg(target_os = "macos")]
     SetVolName(SetVolName<'a>),
@@ -2102,6 +2123,7 @@ impl fmt::Display for Operation<'_> {
                 x.dest(),
                 x.len()
             ),
+            Operation::SyncFs(_) => write!(f, "SYNCFS"),
 
             #[cfg(target_os = "macos")]
             Operation::SetVolName(x) => write!(f, "SETVOLNAME name {:?}", x.name()),
