@@ -41,14 +41,21 @@ fn packet(opcode: u32, body: &[u8]) -> Vec<u64> {
     let len = size_of::<abi::fuse_in_header>() + body.len();
     let mut packet = vec![0u64; len.div_ceil(8)];
     let bytes = packet.as_mut_slice().as_mut_bytes();
-    bytes[..4].copy_from_slice(&(len as u32).to_ne_bytes());
-    bytes[4..8].copy_from_slice(&opcode.to_ne_bytes());
-    bytes[8..16].copy_from_slice(&123u64.to_ne_bytes());
-    bytes[16..24].copy_from_slice(&1u64.to_ne_bytes());
-    bytes[24..28].copy_from_slice(&7u32.to_ne_bytes());
-    bytes[28..32].copy_from_slice(&19u32.to_ne_bytes());
-    bytes[32..36].copy_from_slice(&42u32.to_ne_bytes());
-    bytes[40..len].copy_from_slice(body);
+    let offset = offset_of!(abi::fuse_in_header, len);
+    bytes[offset..offset + 4].copy_from_slice(&(len as u32).to_ne_bytes());
+    let offset = offset_of!(abi::fuse_in_header, opcode);
+    bytes[offset..offset + 4].copy_from_slice(&opcode.to_ne_bytes());
+    let offset = offset_of!(abi::fuse_in_header, unique);
+    bytes[offset..offset + 8].copy_from_slice(&123u64.to_ne_bytes());
+    let offset = offset_of!(abi::fuse_in_header, nodeid);
+    bytes[offset..offset + 8].copy_from_slice(&1u64.to_ne_bytes());
+    let offset = offset_of!(abi::fuse_in_header, uid);
+    bytes[offset..offset + 4].copy_from_slice(&7u32.to_ne_bytes());
+    let offset = offset_of!(abi::fuse_in_header, gid);
+    bytes[offset..offset + 4].copy_from_slice(&19u32.to_ne_bytes());
+    let offset = offset_of!(abi::fuse_in_header, pid);
+    bytes[offset..offset + 4].copy_from_slice(&42u32.to_ne_bytes());
+    bytes[size_of::<abi::fuse_in_header>()..len].copy_from_slice(body);
     packet
 }
 

@@ -8,6 +8,11 @@ mod protocol_tests;
 /// IDs outside the configured range pass through unchanged in each direction.
 /// The default mapping is identity. Identity fallback means this is not
 /// necessarily a bijection over all IDs.
+/// For example, `IdMap::new(1, 100_000, 10_000)` translates client ID 7 to
+/// filesystem ID 100_006, but also passes client ID 100_006 through unchanged.
+/// Both therefore appear as the same filesystem owner. Callers that require
+/// distinct ownership must restrict IDs to the mapped ranges in both namespaces.
+/// This translation does not provide user-namespace isolation.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct IdMap {
     client_base: u32,
@@ -32,7 +37,7 @@ impl IdMap {
 
     /// Translate an incoming client ID into the filesystem's namespace.
     #[inline]
-    pub fn to_filesystem(self, id: u32) -> u32 {
+    pub const fn to_filesystem(self, id: u32) -> u32 {
         match id.checked_sub(self.client_base) {
             Some(offset) if offset < self.count => self.filesystem_base + offset,
             _ => id,
@@ -41,7 +46,7 @@ impl IdMap {
 
     /// Translate an outgoing filesystem ID into the client's namespace.
     #[inline]
-    pub fn to_client(self, id: u32) -> u32 {
+    pub const fn to_client(self, id: u32) -> u32 {
         match id.checked_sub(self.filesystem_base) {
             Some(offset) if offset < self.count => self.client_base + offset,
             _ => id,
@@ -55,6 +60,11 @@ impl IdMap {
 /// in attribute replies. It does not interpret IDs in opaque data such as
 /// extended attributes. Session ACL checks use the original client credentials.
 /// The default mapping is identity.
+///
+/// With a non-identity mapping, filesystems that enable `FUSE_POSIX_ACL` must
+/// separately translate IDs in `system.posix_acl_access` and
+/// `system.posix_acl_default` xattrs if they store ACLs in the filesystem's
+/// namespace. Ownership mapping alone does not translate those ACLs.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FilesystemMapping {
     /// User ID translation.
