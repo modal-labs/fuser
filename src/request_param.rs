@@ -1,19 +1,24 @@
-use ref_cast::RefCastCustom;
-use ref_cast::ref_cast_custom;
-
+use crate::FilesystemMapping;
 use crate::ll;
 use crate::ll::fuse_abi::fuse_in_header;
 
 /// FUSE request parameters.
-#[derive(Debug, RefCastCustom)]
+#[derive(Debug)]
 #[repr(transparent)]
 pub struct Request {
     header: fuse_in_header,
 }
 
 impl Request {
-    #[ref_cast_custom]
-    pub(crate) fn ref_cast(header: &fuse_in_header) -> &Request;
+    pub(crate) fn from_header(header: &fuse_in_header, mapping: FilesystemMapping) -> Self {
+        Self {
+            header: fuse_in_header {
+                uid: mapping.uid.to_filesystem(header.uid),
+                gid: mapping.gid.to_filesystem(header.gid),
+                ..*header
+            },
+        }
+    }
 
     /// Returns the unique identifier of this request
     #[inline]

@@ -1,6 +1,9 @@
 # FUSE for Rust - Changelog
 
 ## Unreleased
+* Add opt-in `FilesystemMapping` for custom transports to translate request and
+  reply ownership IDs without changing filesystem handlers. Existing sessions
+  retain identity mapping.
 * Add `Filesystem::syncfs()`, the `FUSE_SYNCFS` request the kernel sends on `syncfs(2)`. A
   filesystem that does not implement it replies `ENOSYS`, which makes the kernel stop sending it
   and stop waiting for in-flight writes before future `syncfs(2)` calls

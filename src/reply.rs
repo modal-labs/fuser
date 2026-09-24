@@ -22,6 +22,7 @@ use log::warn;
 use crate::Errno;
 use crate::FileAttr;
 use crate::FileType;
+use crate::FilesystemMapping;
 use crate::PollEvents;
 use crate::channel::ChannelSender;
 use crate::ll::Generation;
@@ -168,6 +169,13 @@ impl AssertSender {
 pub(crate) trait Reply: Send + 'static {
     /// Create a new reply for the given request
     fn new(unique: ll::RequestId, sender: ReplySender) -> Self;
+
+    fn with_mapping(self, _mapping: FilesystemMapping) -> Self
+    where
+        Self: Sized,
+    {
+        self
+    }
 }
 
 ///
@@ -285,13 +293,20 @@ impl ReplyData {
 #[derive(Debug)]
 pub struct ReplyEntry {
     reply: ReplyRaw,
+    mapping: FilesystemMapping,
 }
 
 impl Reply for ReplyEntry {
     fn new(unique: ll::RequestId, sender: ReplySender) -> ReplyEntry {
         ReplyEntry {
             reply: Reply::new(unique, sender),
+            mapping: FilesystemMapping::default(),
         }
+    }
+
+    fn with_mapping(mut self, mapping: FilesystemMapping) -> Self {
+        self.mapping = mapping;
+        self
     }
 }
 
@@ -301,7 +316,7 @@ impl ReplyEntry {
         self.reply.send_ll(&ll::ResponseStruct::new_entry(
             attr.ino,
             generation,
-            &attr.into(),
+            &ll::reply::Attr::with_mapping(attr, self.mapping),
             *ttl,
             *ttl,
         ));
@@ -328,7 +343,7 @@ impl ReplyEntry {
         self.reply.send_ll(&ll::ResponseStruct::new_entry(
             attr.ino,
             generation,
-            &attr.into(),
+            &ll::reply::Attr::with_mapping(attr, self.mapping),
             *attr_ttl,
             *entry_ttl,
         ));
@@ -346,21 +361,30 @@ impl ReplyEntry {
 #[derive(Debug)]
 pub struct ReplyAttr {
     reply: ReplyRaw,
+    mapping: FilesystemMapping,
 }
 
 impl Reply for ReplyAttr {
     fn new(unique: ll::RequestId, sender: ReplySender) -> ReplyAttr {
         ReplyAttr {
             reply: Reply::new(unique, sender),
+            mapping: FilesystemMapping::default(),
         }
+    }
+
+    fn with_mapping(mut self, mapping: FilesystemMapping) -> Self {
+        self.mapping = mapping;
+        self
     }
 }
 
 impl ReplyAttr {
     /// Reply to a request with the given attribute
     pub fn attr(self, ttl: &Duration, attr: &FileAttr) {
-        self.reply
-            .send_ll(&ll::ResponseStruct::new_attr(ttl, &attr.into()));
+        self.reply.send_ll(&ll::ResponseStruct::new_attr(
+            ttl,
+            &ll::reply::Attr::with_mapping(attr, self.mapping),
+        ));
     }
 
     /// Reply to a request with the given error code
@@ -549,13 +573,20 @@ impl ReplyStatfs {
 #[derive(Debug)]
 pub struct ReplyCreate {
     reply: ReplyRaw,
+    mapping: FilesystemMapping,
 }
 
 impl Reply for ReplyCreate {
     fn new(unique: ll::RequestId, sender: ReplySender) -> ReplyCreate {
         ReplyCreate {
             reply: Reply::new(unique, sender),
+            mapping: FilesystemMapping::default(),
         }
+    }
+
+    fn with_mapping(mut self, mapping: FilesystemMapping) -> Self {
+        self.mapping = mapping;
+        self
     }
 }
 
@@ -574,7 +605,7 @@ impl ReplyCreate {
         assert!(!flags.contains(FopenFlags::FOPEN_PASSTHROUGH));
         self.reply.send_ll(&ll::ResponseStruct::new_create(
             ttl,
-            &attr.into(),
+            &ll::reply::Attr::with_mapping(attr, self.mapping),
             generation,
             fh,
             flags,
@@ -627,7 +658,7 @@ impl ReplyCreate {
     ) {
         self.reply.send_ll(&ll::ResponseStruct::new_create(
             ttl,
-            &attr.into(),
+            &ll::reply::Attr::with_mapping(attr, self.mapping),
             generation,
             fh,
             flags | FopenFlags::FOPEN_PASSTHROUGH,
@@ -805,10 +836,16 @@ impl ReplyDirectory {
 #[derive(Debug)]
 pub struct ReplyDirectoryPlus {
     reply: ReplyRaw,
+    mapping: FilesystemMapping,
     buf: DirEntPlusList,
 }
 
 impl ReplyDirectoryPlus {
+    pub(crate) fn with_mapping(mut self, mapping: FilesystemMapping) -> Self {
+        self.mapping = mapping;
+        self
+    }
+
     /// Creates a new `ReplyDirectory` with a specified buffer size.
     pub(crate) fn new(
         unique: ll::RequestId,
@@ -818,6 +855,7 @@ impl ReplyDirectoryPlus {
         ReplyDirectoryPlus {
             reply: Reply::new(unique, sender),
             buf: DirEntPlusList::new(size),
+            mapping: FilesystemMapping::default(),
         }
     }
 
@@ -840,7 +878,7 @@ impl ReplyDirectoryPlus {
             DirEntOffset(offset),
             name,
             *ttl,
-            attr.into(),
+            ll::reply::Attr::with_mapping(attr, self.mapping),
             *ttl,
         ))
     }

@@ -322,7 +322,10 @@ pub(crate) fn mode_from_kind_and_perm(kind: FileType, perm: u16) -> u32 {
         | u32::from(perm)
 }
 /// Returns a `fuse_attr` from `FileAttr`
-pub(crate) fn fuse_attr_from_attr(attr: &crate::FileAttr) -> abi::fuse_attr {
+pub(crate) fn fuse_attr_from_attr(
+    attr: &crate::FileAttr,
+    mapping: crate::FilesystemMapping,
+) -> abi::fuse_attr {
     let (atime_secs, atime_nanos) = time_from_system_time(&attr.atime);
     let (mtime_secs, mtime_nanos) = time_from_system_time(&attr.mtime);
     let (ctime_secs, ctime_nanos) = time_from_system_time(&attr.ctime);
@@ -345,8 +348,8 @@ pub(crate) fn fuse_attr_from_attr(attr: &crate::FileAttr) -> abi::fuse_attr {
         crtimensec: crtime_nanos,
         mode: mode_from_kind_and_perm(attr.kind, attr.perm),
         nlink: attr.nlink,
-        uid: attr.uid,
-        gid: attr.gid,
+        uid: mapping.uid.to_client(attr.uid),
+        gid: mapping.gid.to_client(attr.gid),
         rdev: attr.rdev,
         #[cfg(target_os = "macos")]
         flags: attr.flags,
@@ -360,17 +363,24 @@ pub(crate) fn fuse_attr_from_attr(attr: &crate::FileAttr) -> abi::fuse_attr {
 pub(crate) struct Attr {
     pub(crate) attr: abi::fuse_attr,
 }
+impl Attr {
+    pub(crate) fn with_mapping(attr: &crate::FileAttr, mapping: crate::FilesystemMapping) -> Self {
+        Self {
+            attr: fuse_attr_from_attr(attr, mapping),
+        }
+    }
+}
 impl From<&crate::FileAttr> for Attr {
     fn from(attr: &crate::FileAttr) -> Self {
         Self {
-            attr: fuse_attr_from_attr(attr),
+            attr: fuse_attr_from_attr(attr, crate::FilesystemMapping::default()),
         }
     }
 }
 impl From<crate::FileAttr> for Attr {
     fn from(attr: crate::FileAttr) -> Self {
         Self {
-            attr: fuse_attr_from_attr(&attr),
+            attr: fuse_attr_from_attr(&attr, crate::FilesystemMapping::default()),
         }
     }
 }
