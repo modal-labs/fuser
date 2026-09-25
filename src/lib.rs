@@ -47,6 +47,8 @@ pub use crate::ll::request::FileHandle;
 pub use crate::ll::request::INodeNo;
 pub use crate::ll::request::LockOwner;
 pub use crate::ll::request::Version;
+pub use crate::mapping::FilesystemMapping;
+pub use crate::mapping::IdMap;
 pub use crate::mnt::mount_options::Config;
 pub use crate::mnt::mount_options::MountOption;
 pub use crate::notify::Notifier;
@@ -87,6 +89,7 @@ pub use crate::session::SessionUnmounter;
 // Re-exported so that callers building a `DispatchContext` need not depend on a
 // matching version of nix themselves.
 pub use crate::session::handshake_request;
+pub use crate::session::handshake_request_with_mapping;
 pub use nix::unistd::Uid;
 
 mod access_flags;
@@ -98,6 +101,7 @@ mod dev_fuse;
 pub mod experimental;
 mod forget_one;
 mod ll;
+mod mapping;
 mod mnt;
 mod notify;
 mod open_flags;

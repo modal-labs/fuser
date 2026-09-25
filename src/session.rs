@@ -26,6 +26,7 @@ use parking_lot::Mutex;
 
 use crate::Errno;
 use crate::Filesystem;
+use crate::FilesystemMapping;
 use crate::KernelConfig;
 use crate::MountOption;
 use crate::ReplyEmpty;
@@ -436,6 +437,19 @@ pub fn handshake_request<FS: Filesystem>(
     sender: ReplySender,
     data: &[u8],
 ) -> io::Result<HandshakeOutcome> {
+    handshake_request_with_mapping(filesystem, sender, data, FilesystemMapping::default())
+}
+
+/// Complete the FUSE_INIT handshake with translated request credentials.
+///
+/// Use the same mapping for subsequent requests via
+/// [`RequestWithSender::with_mapping`].
+pub fn handshake_request_with_mapping<FS: Filesystem>(
+    filesystem: &mut FS,
+    sender: ReplySender,
+    data: &[u8],
+    mapping: FilesystemMapping,
+) -> io::Result<HandshakeOutcome> {
     let request = match ll::AnyRequest::try_from(data) {
         Ok(request) => request,
         Err(err) => {
@@ -492,7 +506,10 @@ pub fn handshake_request<FS: Filesystem>(
     let mut config = KernelConfig::new(init.capabilities(), init.max_readahead(), v);
 
     // Call filesystem init method and give it a chance to return an error
-    if let Err(error) = filesystem.init(Request::ref_cast(request.header()), &mut config) {
+    if let Err(error) = filesystem.init(
+        &Request::from_header(request.header(), mapping),
+        &mut config,
+    ) {
         let errno = Errno::from_i32(error.raw_os_error().unwrap_or(0));
         <ReplyRaw as Reply>::new(request.unique(), sender).send_ll(&ResponseErrno(errno));
         return Err(error);

@@ -12,6 +12,7 @@ use log::debug;
 use log::error;
 
 use crate::Filesystem;
+use crate::FilesystemMapping;
 use crate::PollNotifier;
 use crate::RenameFlags;
 use crate::Request;
@@ -38,6 +39,7 @@ pub struct RequestWithSender<'a> {
     sender: ReplySender,
     /// Parsed request
     pub(crate) request: ll::AnyRequest<'a>,
+    mapping: FilesystemMapping,
 }
 
 impl<'a> RequestWithSender<'a> {
@@ -53,7 +55,20 @@ impl<'a> RequestWithSender<'a> {
             }
         };
 
-        Some(Self { sender, request })
+        Some(Self {
+            sender,
+            request,
+            mapping: FilesystemMapping::default(),
+        })
+    }
+
+    /// Translate identifiers between the client and filesystem for this request.
+    ///
+    /// Attribute replies own a copy of the mapping and may outlive the request.
+    /// Session ACL checks still use the original client credentials.
+    pub fn with_mapping(mut self, mapping: FilesystemMapping) -> Self {
+        self.mapping = mapping;
+        self
     }
 
     /// Dispatch request to the given filesystem.
@@ -103,6 +118,7 @@ impl<'a> RequestWithSender<'a> {
         }
 
         let filesystem = se.filesystem;
+        let request = Request::from_header(self.request.header(), self.mapping);
 
         match op {
             // Filesystem initialization - should not happen after handshake completed
@@ -122,18 +138,18 @@ impl<'a> RequestWithSender<'a> {
 
             ll::Operation::Lookup(x) => {
                 filesystem.lookup(
-                    self.request_header(),
+                    &request,
                     self.request.nodeid(),
                     x.name().as_ref(),
                     self.reply(),
                 );
             }
             ll::Operation::Forget(x) => {
-                filesystem.forget(self.request_header(), self.request.nodeid(), x.nlookup()); // no reply
+                filesystem.forget(&request, self.request.nodeid(), x.nlookup()); // no reply
             }
             ll::Operation::GetAttr(_attr) => {
                 filesystem.getattr(
-                    self.request_header(),
+                    &request,
                     self.request.nodeid(),
                     _attr.file_handle(),
                     self.reply(),
@@ -141,11 +157,11 @@ impl<'a> RequestWithSender<'a> {
             }
             ll::Operation::SetAttr(x) => {
                 filesystem.setattr(
-                    self.request_header(),
+                    &request,
                     self.request.nodeid(),
                     x.mode(),
-                    x.uid(),
-                    x.gid(),
+                    x.uid().map(|id| self.mapping.uid.to_filesystem(id)),
+                    x.gid().map(|id| self.mapping.gid.to_filesystem(id)),
                     x.size(),
                     x.atime(),
                     x.mtime(),
@@ -159,11 +175,11 @@ impl<'a> RequestWithSender<'a> {
                 );
             }
             ll::Operation::ReadLink(_) => {
-                filesystem.readlink(self.request_header(), self.request.nodeid(), self.reply());
+                filesystem.readlink(&request, self.request.nodeid(), self.reply());
             }
             ll::Operation::MkNod(x) => {
                 filesystem.mknod(
-                    self.request_header(),
+                    &request,
                     self.request.nodeid(),
                     x.name().as_ref(),
                     x.mode(),
@@ -174,7 +190,7 @@ impl<'a> RequestWithSender<'a> {
             }
             ll::Operation::MkDir(x) => {
                 filesystem.mkdir(
-                    self.request_header(),
+                    &request,
                     self.request.nodeid(),
                     x.name().as_ref(),
                     x.mode(),
@@ -184,7 +200,7 @@ impl<'a> RequestWithSender<'a> {
             }
             ll::Operation::Unlink(x) => {
                 filesystem.unlink(
-                    self.request_header(),
+                    &request,
                     self.request.nodeid(),
                     x.name().as_ref(),
                     self.reply(),
@@ -192,7 +208,7 @@ impl<'a> RequestWithSender<'a> {
             }
             ll::Operation::RmDir(x) => {
                 filesystem.rmdir(
-                    self.request_header(),
+                    &request,
                     self.request.nodeid(),
                     x.name().as_ref(),
                     self.reply(),
@@ -200,7 +216,7 @@ impl<'a> RequestWithSender<'a> {
             }
             ll::Operation::SymLink(x) => {
                 filesystem.symlink(
-                    self.request_header(),
+                    &request,
                     self.request.nodeid(),
                     x.link_name().as_ref(),
                     Path::new(x.target()),
@@ -209,7 +225,7 @@ impl<'a> RequestWithSender<'a> {
             }
             ll::Operation::Rename(x) => {
                 filesystem.rename(
-                    self.request_header(),
+                    &request,
                     self.request.nodeid(),
                     x.src().name.as_ref(),
                     x.dest().dir,
@@ -220,7 +236,7 @@ impl<'a> RequestWithSender<'a> {
             }
             ll::Operation::Link(x) => {
                 filesystem.link(
-                    self.request_header(),
+                    &request,
                     x.inode_no(),
                     self.request.nodeid(),
                     x.dest().name.as_ref(),
@@ -228,16 +244,11 @@ impl<'a> RequestWithSender<'a> {
                 );
             }
             ll::Operation::Open(x) => {
-                filesystem.open(
-                    self.request_header(),
-                    self.request.nodeid(),
-                    x.flags(),
-                    self.reply(),
-                );
+                filesystem.open(&request, self.request.nodeid(), x.flags(), self.reply());
             }
             ll::Operation::Read(x) => {
                 filesystem.read(
-                    self.request_header(),
+                    &request,
                     self.request.nodeid(),
                     x.file_handle(),
                     x.offset()?,
@@ -249,7 +260,7 @@ impl<'a> RequestWithSender<'a> {
             }
             ll::Operation::Write(x) => {
                 filesystem.write(
-                    self.request_header(),
+                    &request,
                     self.request.nodeid(),
                     x.file_handle(),
                     x.offset()?,
@@ -262,7 +273,7 @@ impl<'a> RequestWithSender<'a> {
             }
             ll::Operation::Flush(x) => {
                 filesystem.flush(
-                    self.request_header(),
+                    &request,
                     self.request.nodeid(),
                     x.file_handle(),
                     x.lock_owner(),
@@ -271,7 +282,7 @@ impl<'a> RequestWithSender<'a> {
             }
             ll::Operation::Release(x) => {
                 filesystem.release(
-                    self.request_header(),
+                    &request,
                     self.request.nodeid(),
                     x.file_handle(),
                     x.flags(),
@@ -282,7 +293,7 @@ impl<'a> RequestWithSender<'a> {
             }
             ll::Operation::FSync(x) => {
                 filesystem.fsync(
-                    self.request_header(),
+                    &request,
                     self.request.nodeid(),
                     x.file_handle(),
                     x.fdatasync(),
@@ -290,16 +301,11 @@ impl<'a> RequestWithSender<'a> {
                 );
             }
             ll::Operation::OpenDir(x) => {
-                filesystem.opendir(
-                    self.request_header(),
-                    self.request.nodeid(),
-                    x.flags(),
-                    self.reply(),
-                );
+                filesystem.opendir(&request, self.request.nodeid(), x.flags(), self.reply());
             }
             ll::Operation::ReadDir(x) => {
                 filesystem.readdir(
-                    self.request_header(),
+                    &request,
                     self.request.nodeid(),
                     x.file_handle(),
                     x.offset(),
@@ -312,7 +318,7 @@ impl<'a> RequestWithSender<'a> {
             }
             ll::Operation::ReleaseDir(x) => {
                 filesystem.releasedir(
-                    self.request_header(),
+                    &request,
                     self.request.nodeid(),
                     x.file_handle(),
                     x.flags(),
@@ -321,7 +327,7 @@ impl<'a> RequestWithSender<'a> {
             }
             ll::Operation::FSyncDir(x) => {
                 filesystem.fsyncdir(
-                    self.request_header(),
+                    &request,
                     self.request.nodeid(),
                     x.file_handle(),
                     x.fdatasync(),
@@ -329,14 +335,14 @@ impl<'a> RequestWithSender<'a> {
                 );
             }
             ll::Operation::StatFs(_) => {
-                filesystem.statfs(self.request_header(), self.request.nodeid(), self.reply());
+                filesystem.statfs(&request, self.request.nodeid(), self.reply());
             }
             ll::Operation::SyncFs(_) => {
-                filesystem.syncfs(self.request_header(), self.request.nodeid(), self.reply());
+                filesystem.syncfs(&request, self.request.nodeid(), self.reply());
             }
             ll::Operation::SetXAttr(x) => {
                 filesystem.setxattr(
-                    self.request_header(),
+                    &request,
                     self.request.nodeid(),
                     x.name(),
                     x.value(),
@@ -347,7 +353,7 @@ impl<'a> RequestWithSender<'a> {
             }
             ll::Operation::GetXAttr(x) => {
                 filesystem.getxattr(
-                    self.request_header(),
+                    &request,
                     self.request.nodeid(),
                     x.name(),
                     x.size_u32(),
@@ -355,32 +361,17 @@ impl<'a> RequestWithSender<'a> {
                 );
             }
             ll::Operation::ListXAttr(x) => {
-                filesystem.listxattr(
-                    self.request_header(),
-                    self.request.nodeid(),
-                    x.size(),
-                    self.reply(),
-                );
+                filesystem.listxattr(&request, self.request.nodeid(), x.size(), self.reply());
             }
             ll::Operation::RemoveXAttr(x) => {
-                filesystem.removexattr(
-                    self.request_header(),
-                    self.request.nodeid(),
-                    x.name(),
-                    self.reply(),
-                );
+                filesystem.removexattr(&request, self.request.nodeid(), x.name(), self.reply());
             }
             ll::Operation::Access(x) => {
-                filesystem.access(
-                    self.request_header(),
-                    self.request.nodeid(),
-                    x.mask(),
-                    self.reply(),
-                );
+                filesystem.access(&request, self.request.nodeid(), x.mask(), self.reply());
             }
             ll::Operation::Create(x) => {
                 filesystem.create(
-                    self.request_header(),
+                    &request,
                     self.request.nodeid(),
                     x.name().as_ref(),
                     x.mode(),
@@ -391,7 +382,7 @@ impl<'a> RequestWithSender<'a> {
             }
             ll::Operation::GetLk(x) => {
                 filesystem.getlk(
-                    self.request_header(),
+                    &request,
                     self.request.nodeid(),
                     x.file_handle(),
                     x.lock_owner(),
@@ -404,7 +395,7 @@ impl<'a> RequestWithSender<'a> {
             }
             ll::Operation::SetLk(x) => {
                 filesystem.setlk(
-                    self.request_header(),
+                    &request,
                     self.request.nodeid(),
                     x.file_handle(),
                     x.lock_owner(),
@@ -418,7 +409,7 @@ impl<'a> RequestWithSender<'a> {
             }
             ll::Operation::BMap(x) => {
                 filesystem.bmap(
-                    self.request_header(),
+                    &request,
                     self.request.nodeid(),
                     x.block_size(),
                     x.block(),
@@ -431,7 +422,7 @@ impl<'a> RequestWithSender<'a> {
                     return Err(Errno::ENOSYS);
                 }
                 filesystem.ioctl(
-                    self.request_header(),
+                    &request,
                     self.request.nodeid(),
                     x.file_handle(),
                     x.flags(),
@@ -445,7 +436,7 @@ impl<'a> RequestWithSender<'a> {
                 let ph = PollNotifier::new(self.sender.clone(), x.kernel_handle());
 
                 filesystem.poll(
-                    self.request_header(),
+                    &request,
                     self.request.nodeid(),
                     x.file_handle(),
                     ph,
@@ -459,14 +450,11 @@ impl<'a> RequestWithSender<'a> {
                 return Err(Errno::ENOSYS);
             }
             ll::Operation::BatchForget(x) => {
-                filesystem.batch_forget(
-                    self.request_header(),
-                    ForgetOne::slice_from_inner(x.nodes()),
-                ); // no reply
+                filesystem.batch_forget(&request, ForgetOne::slice_from_inner(x.nodes())); // no reply
             }
             ll::Operation::FAllocate(x) => {
                 filesystem.fallocate(
-                    self.request_header(),
+                    &request,
                     self.request.nodeid(),
                     x.file_handle(),
                     x.offset()?,
@@ -477,7 +465,7 @@ impl<'a> RequestWithSender<'a> {
             }
             ll::Operation::ReadDirPlus(x) => {
                 filesystem.readdirplus(
-                    self.request_header(),
+                    &request,
                     self.request.nodeid(),
                     x.file_handle(),
                     x.offset(),
@@ -485,12 +473,13 @@ impl<'a> RequestWithSender<'a> {
                         self.request.unique(),
                         self.sender.clone(),
                         x.size() as usize,
-                    ),
+                    )
+                    .with_mapping(self.mapping),
                 );
             }
             ll::Operation::Rename2(x) => {
                 filesystem.rename(
-                    self.request_header(),
+                    &request,
                     x.from().dir,
                     x.from().name.as_ref(),
                     x.to().dir,
@@ -501,7 +490,7 @@ impl<'a> RequestWithSender<'a> {
             }
             ll::Operation::Lseek(x) => {
                 filesystem.lseek(
-                    self.request_header(),
+                    &request,
                     self.request.nodeid(),
                     x.file_handle(),
                     x.offset(),
@@ -512,7 +501,7 @@ impl<'a> RequestWithSender<'a> {
             ll::Operation::CopyFileRange(x) => {
                 let (i, o) = (x.src()?, x.dest()?);
                 filesystem.copy_file_range(
-                    self.request_header(),
+                    &request,
                     i.inode,
                     i.file_handle,
                     i.offset,
@@ -526,16 +515,16 @@ impl<'a> RequestWithSender<'a> {
             }
             #[cfg(target_os = "macos")]
             ll::Operation::SetVolName(x) => {
-                filesystem.setvolname(self.request_header(), x.name(), self.reply());
+                filesystem.setvolname(&request, x.name(), self.reply());
             }
             #[cfg(target_os = "macos")]
             ll::Operation::GetXTimes(x) => {
-                filesystem.getxtimes(self.request_header(), x.nodeid(), self.reply());
+                filesystem.getxtimes(&request, x.nodeid(), self.reply());
             }
             #[cfg(target_os = "macos")]
             ll::Operation::Exchange(x) => {
                 filesystem.exchange(
-                    self.request_header(),
+                    &request,
                     x.from().dir,
                     x.from().name.as_ref(),
                     x.to().dir,
@@ -556,12 +545,6 @@ impl<'a> RequestWithSender<'a> {
     /// Create a reply object for this request that can be passed to the filesystem
     /// implementation and makes sure that a request is replied exactly once
     pub(crate) fn reply<T: Reply>(&self) -> T {
-        Reply::new(self.request.unique(), self.sender.clone())
-    }
-
-    /// Returns a Request reference for this request
-    #[inline]
-    fn request_header(&self) -> &Request {
-        Request::ref_cast(self.request.header())
+        T::new(self.request.unique(), self.sender.clone()).with_mapping(self.mapping)
     }
 }
