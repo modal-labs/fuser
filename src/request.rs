@@ -24,10 +24,23 @@ use crate::ll::ResponseErrno;
 use crate::reply::Reply;
 use crate::reply::ReplyDirectory;
 use crate::reply::ReplyDirectoryPlus;
+use crate::reply::ReplyEmpty;
 use crate::reply::ReplyRaw;
 use crate::reply::ReplySender;
 use crate::session::DispatchContext;
 use crate::session::SessionACL;
+
+/// Result of dispatching a request to a filesystem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchOutcome {
+    /// The request was served without ending the FUSE session.
+    Served,
+    /// The request was FUSE_DESTROY and has been acknowledged. The kernel has
+    /// torn down the session, so the transport should stop serving it.
+    /// `dispatch` does not call `Filesystem::destroy` (which needs `&mut`); the
+    /// owner calls it.
+    Destroyed,
+}
 
 /// A parsed FUSE request paired with the transport its reply goes back on.
 ///
@@ -74,13 +87,21 @@ impl<'a> RequestWithSender<'a> {
     /// Dispatch request to the given filesystem.
     /// This calls the appropriate filesystem operation method for the
     /// request and sends back the returned reply to the kernel
-    pub fn dispatch<FS: Filesystem>(&self, se: &DispatchContext<'_, FS>) {
+    ///
+    /// Returns [`DispatchOutcome::Destroyed`] when an acknowledged FUSE_DESTROY
+    /// request ends the session.
+    pub fn dispatch<FS: Filesystem>(&self, se: &DispatchContext<'_, FS>) -> DispatchOutcome {
         debug!("{} thread={}", self.request, se.thread_name);
+        if let Ok(ll::Operation::Destroy(_)) = self.request.operation() {
+            self.reply::<ReplyEmpty>().ok();
+            return DispatchOutcome::Destroyed;
+        }
         match self.dispatch_req(se) {
             Ok(Some(resp)) => self.reply::<ReplyRaw>().send_ll(&resp),
             Ok(None) => {}
             Err(errno) => self.reply::<ReplyRaw>().send_ll(&ResponseErrno(errno)),
         }
+        DispatchOutcome::Served
     }
 
     fn dispatch_req<FS: Filesystem>(
@@ -127,7 +148,7 @@ impl<'a> RequestWithSender<'a> {
                 return Err(Errno::EIO);
             }
             ll::Operation::Destroy(_x) => {
-                // This is handled before dispatch call.
+                // DESTROY requests are handled by dispatch().
                 return Err(Errno::EIO);
             }
 

@@ -29,13 +29,11 @@ use crate::Filesystem;
 use crate::FilesystemMapping;
 use crate::KernelConfig;
 use crate::MountOption;
-use crate::ReplyEmpty;
 use crate::Request;
 use crate::channel::Channel;
 use crate::channel::ChannelSender;
 use crate::dev_fuse::DevFuse;
 use crate::ll;
-use crate::ll::Operation;
 use crate::ll::ResponseErrno;
 use crate::ll::Version;
 use crate::ll::flags::init_flags::InitFlags;
@@ -48,6 +46,7 @@ use crate::read_buf::FuseReadBuf;
 use crate::reply::Reply;
 use crate::reply::ReplyRaw;
 use crate::reply::ReplySender;
+use crate::request::DispatchOutcome;
 use crate::request::RequestWithSender;
 
 /// The max size of write requests from the kernel. The absolute minimum is 4k,
@@ -422,8 +421,10 @@ pub enum HandshakeOutcome {
         /// Largest write the kernel will send, useful for sizing read buffers.
         max_write: u32,
     },
-    /// The kernel speaks a newer major version than this crate does and has been
-    /// told which version we support; it will send another init message.
+    /// The handshake has not completed yet: either the kernel speaks a newer
+    /// major version and has been sent ours, or a request that takes no reply
+    /// arrived before init. Callers should keep passing requests to the
+    /// handshake until it returns [`HandshakeOutcome::Complete`].
     NeedAnotherInit,
 }
 
@@ -467,6 +468,11 @@ pub fn handshake_request_with_mapping<FS: Filesystem>(
 
     let init = match op {
         ll::Operation::Init(init) => init,
+        ll::Operation::Forget(_) | ll::Operation::BatchForget(_) => {
+            debug!("Ignoring {request} before init");
+            drop(sender);
+            return Ok(HandshakeOutcome::NeedAnotherInit);
+        }
         _ => {
             error!("Received non-init FUSE operation before init: {}", request);
             <ReplyRaw as Reply>::new(request.unique(), sender)
@@ -621,11 +627,8 @@ impl<FS: Filesystem> SessionEventLoop<FS> {
                 ) {
                     // Dispatch request
                     Some(req) => {
-                        if let Ok(Operation::Destroy(_)) = req.request.operation() {
-                            req.reply::<ReplyEmpty>().ok();
+                        if req.dispatch(&cx) == DispatchOutcome::Destroyed {
                             return Ok(());
-                        } else {
-                            req.dispatch(&cx)
                         }
                     }
                     // Quit loop on illegal request

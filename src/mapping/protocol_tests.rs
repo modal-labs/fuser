@@ -9,10 +9,10 @@ use zerocopy::IntoBytes;
 
 use crate::ll::fuse_abi as abi;
 use crate::{
-    BackingId, BsdFileFlags, CustomReplySender, DispatchContext, FileAttr, FileHandle, FileType,
-    Filesystem, FilesystemMapping, FopenFlags, Generation, HandshakeOutcome, INodeNo, IdMap,
-    KernelConfig, ReplyAttr, ReplyCreate, ReplyDirectoryPlus, ReplyEntry, ReplySender, Request,
-    RequestWithSender, SessionACL, TimeOrNow, Uid,
+    BackingId, BsdFileFlags, CustomReplySender, DispatchContext, DispatchOutcome, FileAttr,
+    FileHandle, FileType, Filesystem, FilesystemMapping, FopenFlags, Generation, HandshakeOutcome,
+    INodeNo, IdMap, KernelConfig, ReplyAttr, ReplyCreate, ReplyDirectoryPlus, ReplyEntry,
+    ReplySender, Request, RequestWithSender, SessionACL, TimeOrNow, Uid,
 };
 
 const MAPPING: FilesystemMapping = FilesystemMapping {
@@ -402,4 +402,96 @@ fn init_credentials_and_default_identity() {
         ownership(&receive(rx), 16 + offset_of!(abi::fuse_entry_out, attr)),
         (100_006, 200_018)
     );
+}
+
+#[test]
+fn dispatch_destroy_returns_destroyed_and_acknowledges_request() {
+    let fs = Probe::new(MAPPING);
+    let packet = packet(38, &[]);
+    let (sender, rx) = sender();
+    let outcome = RequestWithSender::new(sender, packet.as_slice().as_bytes())
+        .unwrap()
+        .with_mapping(MAPPING)
+        .dispatch(&DispatchContext {
+            filesystem: &fs,
+            allowed: SessionACL::All,
+            session_owner: Uid::from_raw(0),
+            thread_name: "mapping-test",
+        });
+
+    assert_eq!(outcome, DispatchOutcome::Destroyed);
+    let reply = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert_eq!(reply.len(), 16);
+    assert_eq!(i32::from_ne_bytes(reply[4..8].try_into().unwrap()), 0);
+    assert_eq!(u64::from_ne_bytes(reply[8..16].try_into().unwrap()), 123);
+    assert!(matches!(
+        rx.try_recv(),
+        Err(mpsc::TryRecvError::Disconnected)
+    ));
+}
+
+#[test]
+fn handshake_ignores_forgets_without_replies_before_init() {
+    for (opcode, body) in [
+        (2, vec![0; size_of::<abi::fuse_forget_in>()]),
+        (42, vec![0; size_of::<abi::fuse_batch_forget_in>()]),
+    ] {
+        let mut fs = Probe::new(MAPPING);
+        let packet = packet(opcode, &body);
+        let (sender, rx) = sender();
+
+        let result = crate::handshake_request_with_mapping(
+            &mut fs,
+            sender,
+            packet.as_slice().as_bytes(),
+            MAPPING,
+        );
+
+        assert!(matches!(result, Ok(HandshakeOutcome::NeedAnotherInit)));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+    }
+}
+
+#[test]
+fn handshake_replies_eio_for_getattr_before_init() {
+    let mut fs = Probe::new(MAPPING);
+    let body = vec![0; size_of::<abi::fuse_getattr_in>()];
+    let packet = packet(3, &body);
+    let (sender, rx) = sender();
+
+    let result = crate::handshake_request_with_mapping(
+        &mut fs,
+        sender,
+        packet.as_slice().as_bytes(),
+        MAPPING,
+    );
+
+    assert!(result.is_err());
+    let reply = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert_eq!(
+        i32::from_ne_bytes(reply[4..8].try_into().unwrap()),
+        -libc::EIO
+    );
+}
+
+#[test]
+fn dispatch_lookup_returns_served() {
+    let fs = Probe::new(MAPPING);
+    let packet = packet(1, b"entry\0");
+    let (sender, rx) = sender();
+    let outcome = RequestWithSender::new(sender, packet.as_slice().as_bytes())
+        .unwrap()
+        .with_mapping(MAPPING)
+        .dispatch(&DispatchContext {
+            filesystem: &fs,
+            allowed: SessionACL::All,
+            session_owner: Uid::from_raw(0),
+            thread_name: "mapping-test",
+        });
+
+    assert_eq!(outcome, DispatchOutcome::Served);
+    receive(rx);
 }
