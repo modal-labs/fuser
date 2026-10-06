@@ -403,3 +403,12 @@ fn init_credentials_and_default_identity() {
         (100_006, 200_018)
     );
 }
+
+#[test]
+fn dispatch_acknowledges_destroy() {
+    let mapping = FilesystemMapping::default();
+    let fs = Probe::new(mapping);
+    let reply = dispatch(&fs, 38, &[], mapping).try_recv().unwrap();
+    assert_eq!(reply.len(), 16);
+    assert_eq!(i32::from_ne_bytes(reply[4..8].try_into().unwrap()), 0);
+}

@@ -40,8 +40,8 @@ use crate::passthrough::BackingId;
 /// A transport that carries FUSE replies back to whoever issued the request.
 ///
 /// Implementing this allows a [`Filesystem`](crate::Filesystem) to be driven over
-/// something other than `/dev/fuse` — a virtiofs virtqueue, for instance — by
-/// pairing it with [`Request::dispatch`](crate::Request::dispatch).
+/// something other than `/dev/fuse`, such as a virtiofs virtqueue, by
+/// pairing it with [`RequestWithSender::dispatch`](crate::RequestWithSender::dispatch).
 pub trait CustomReplySender: Send + Sync + 'static {
     /// Send reply data.
     fn send(&self, data: &[IoSlice<'_>]) -> std::io::Result<()>;

@@ -29,13 +29,11 @@ use crate::Filesystem;
 use crate::FilesystemMapping;
 use crate::KernelConfig;
 use crate::MountOption;
-use crate::ReplyEmpty;
 use crate::Request;
 use crate::channel::Channel;
 use crate::channel::ChannelSender;
 use crate::dev_fuse::DevFuse;
 use crate::ll;
-use crate::ll::Operation;
 use crate::ll::ResponseErrno;
 use crate::ll::Version;
 use crate::ll::flags::init_flags::InitFlags;
@@ -621,11 +619,10 @@ impl<FS: Filesystem> SessionEventLoop<FS> {
                 ) {
                     // Dispatch request
                     Some(req) => {
-                        if let Ok(Operation::Destroy(_)) = req.request.operation() {
-                            req.reply::<ReplyEmpty>().ok();
+                        let is_destroy = req.is_destroy();
+                        req.dispatch(&cx);
+                        if is_destroy {
                             return Ok(());
-                        } else {
-                            req.dispatch(&cx)
                         }
                     }
                     // Quit loop on illegal request

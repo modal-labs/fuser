@@ -24,6 +24,7 @@ use crate::ll::ResponseErrno;
 use crate::reply::Reply;
 use crate::reply::ReplyDirectory;
 use crate::reply::ReplyDirectoryPlus;
+use crate::reply::ReplyEmpty;
 use crate::reply::ReplyRaw;
 use crate::reply::ReplySender;
 use crate::session::DispatchContext;
@@ -71,11 +72,25 @@ impl<'a> RequestWithSender<'a> {
         self
     }
 
+    /// Whether this request ends the FUSE session.
+    ///
+    /// Transports can record teardown before dispatch acknowledges the request.
+    pub fn is_destroy(&self) -> bool {
+        matches!(self.request.operation(), Ok(ll::Operation::Destroy(_)))
+    }
+
     /// Dispatch request to the given filesystem.
     /// This calls the appropriate filesystem operation method for the
     /// request and sends back the returned reply to the kernel
+    ///
+    /// Acknowledges FUSE_DESTROY without calling [`Filesystem::destroy`]. `Session`
+    /// calls it once its event loops exit; custom transports must call it themselves.
     pub fn dispatch<FS: Filesystem>(&self, se: &DispatchContext<'_, FS>) {
         debug!("{} thread={}", self.request, se.thread_name);
+        if self.is_destroy() {
+            self.reply::<ReplyEmpty>().ok();
+            return;
+        }
         match self.dispatch_req(se) {
             Ok(Some(resp)) => self.reply::<ReplyRaw>().send_ll(&resp),
             Ok(None) => {}
@@ -127,7 +142,7 @@ impl<'a> RequestWithSender<'a> {
                 return Err(Errno::EIO);
             }
             ll::Operation::Destroy(_x) => {
-                // This is handled before dispatch call.
+                // DESTROY requests are handled by dispatch().
                 return Err(Errno::EIO);
             }
 
