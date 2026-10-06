@@ -83,8 +83,8 @@ impl<'a> RequestWithSender<'a> {
     /// This calls the appropriate filesystem operation method for the
     /// request and sends back the returned reply to the kernel
     ///
-    /// Acknowledges FUSE_DESTROY without calling [`Filesystem::destroy`]; the
-    /// owner is responsible for filesystem cleanup.
+    /// Acknowledges FUSE_DESTROY without calling [`Filesystem::destroy`]. `Session`
+    /// calls it once its event loops exit; custom transports must call it themselves.
     pub fn dispatch<FS: Filesystem>(&self, se: &DispatchContext<'_, FS>) {
         debug!("{} thread={}", self.request, se.thread_name);
         if self.is_destroy() {
