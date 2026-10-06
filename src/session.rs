@@ -420,10 +420,8 @@ pub enum HandshakeOutcome {
         /// Largest write the kernel will send, useful for sizing read buffers.
         max_write: u32,
     },
-    /// The handshake has not completed yet: either the kernel speaks a newer
-    /// major version and has been sent ours, or a request that takes no reply
-    /// arrived before init. Callers should keep passing requests to the
-    /// handshake until it returns [`HandshakeOutcome::Complete`].
+    /// The kernel speaks a newer major version than this crate does and has been
+    /// told which version we support; it will send another init message.
     NeedAnotherInit,
 }
 
@@ -467,11 +465,6 @@ pub fn handshake_request_with_mapping<FS: Filesystem>(
 
     let init = match op {
         ll::Operation::Init(init) => init,
-        ll::Operation::Forget(_) | ll::Operation::BatchForget(_) => {
-            debug!("Ignoring {request} before init");
-            drop(sender);
-            return Ok(HandshakeOutcome::NeedAnotherInit);
-        }
         _ => {
             error!("Received non-init FUSE operation before init: {}", request);
             <ReplyRaw as Reply>::new(request.unique(), sender)

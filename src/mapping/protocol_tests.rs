@@ -433,31 +433,6 @@ fn identifies_destroy_before_dispatch_acknowledges_request() {
 }
 
 #[test]
-fn handshake_ignores_forgets_without_replies_before_init() {
-    for (opcode, body) in [
-        (2, vec![0; size_of::<abi::fuse_forget_in>()]),
-        (42, vec![0; size_of::<abi::fuse_batch_forget_in>()]),
-    ] {
-        let mut fs = Probe::new(MAPPING);
-        let packet = packet(opcode, &body);
-        let (sender, rx) = sender();
-
-        let result = crate::handshake_request_with_mapping(
-            &mut fs,
-            sender,
-            packet.as_slice().as_bytes(),
-            MAPPING,
-        );
-
-        assert!(matches!(result, Ok(HandshakeOutcome::NeedAnotherInit)));
-        assert!(matches!(
-            rx.try_recv(),
-            Err(mpsc::TryRecvError::Disconnected)
-        ));
-    }
-}
-
-#[test]
 fn handshake_replies_eio_for_getattr_before_init() {
     let mut fs = Probe::new(MAPPING);
     let body = vec![0; size_of::<abi::fuse_getattr_in>()];
