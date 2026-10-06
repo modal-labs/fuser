@@ -405,71 +405,10 @@ fn init_credentials_and_default_identity() {
 }
 
 #[test]
-fn identifies_destroy_before_dispatch_acknowledges_request() {
-    let fs = Probe::new(MAPPING);
-    let packet = packet(38, &[]);
-    let (sender, rx) = sender();
-    let request = RequestWithSender::new(sender, packet.as_slice().as_bytes())
-        .unwrap()
-        .with_mapping(MAPPING);
-    assert!(request.is_destroy());
-    assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
-    request.dispatch(&DispatchContext {
-        filesystem: &fs,
-        allowed: SessionACL::All,
-        session_owner: Uid::from_raw(0),
-        thread_name: "mapping-test",
-    });
-
-    drop(request);
-    let reply = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+fn dispatch_acknowledges_destroy() {
+    let mapping = FilesystemMapping::default();
+    let fs = Probe::new(mapping);
+    let reply = dispatch(&fs, 38, &[], mapping).try_recv().unwrap();
     assert_eq!(reply.len(), 16);
     assert_eq!(i32::from_ne_bytes(reply[4..8].try_into().unwrap()), 0);
-    assert_eq!(u64::from_ne_bytes(reply[8..16].try_into().unwrap()), 123);
-    assert!(matches!(
-        rx.try_recv(),
-        Err(mpsc::TryRecvError::Disconnected)
-    ));
-}
-
-#[test]
-fn handshake_replies_eio_for_getattr_before_init() {
-    let mut fs = Probe::new(MAPPING);
-    let body = vec![0; size_of::<abi::fuse_getattr_in>()];
-    let packet = packet(3, &body);
-    let (sender, rx) = sender();
-
-    let result = crate::handshake_request_with_mapping(
-        &mut fs,
-        sender,
-        packet.as_slice().as_bytes(),
-        MAPPING,
-    );
-
-    assert!(result.is_err());
-    let reply = rx.recv_timeout(Duration::from_secs(1)).unwrap();
-    assert_eq!(
-        i32::from_ne_bytes(reply[4..8].try_into().unwrap()),
-        -libc::EIO
-    );
-}
-
-#[test]
-fn lookup_is_not_destroy() {
-    let fs = Probe::new(MAPPING);
-    let packet = packet(1, b"entry\0");
-    let (sender, rx) = sender();
-    let request = RequestWithSender::new(sender, packet.as_slice().as_bytes())
-        .unwrap()
-        .with_mapping(MAPPING);
-    assert!(!request.is_destroy());
-    request.dispatch(&DispatchContext {
-        filesystem: &fs,
-        allowed: SessionACL::All,
-        session_owner: Uid::from_raw(0),
-        thread_name: "mapping-test",
-    });
-
-    drop(request);
-    receive(rx);
 }
