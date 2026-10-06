@@ -9,10 +9,10 @@ use zerocopy::IntoBytes;
 
 use crate::ll::fuse_abi as abi;
 use crate::{
-    BackingId, BsdFileFlags, CustomReplySender, DispatchContext, DispatchOutcome, FileAttr,
-    FileHandle, FileType, Filesystem, FilesystemMapping, FopenFlags, Generation, HandshakeOutcome,
-    INodeNo, IdMap, KernelConfig, ReplyAttr, ReplyCreate, ReplyDirectoryPlus, ReplyEntry,
-    ReplySender, Request, RequestWithSender, SessionACL, TimeOrNow, Uid,
+    BackingId, BsdFileFlags, CustomReplySender, DispatchContext, FileAttr, FileHandle, FileType,
+    Filesystem, FilesystemMapping, FopenFlags, Generation, HandshakeOutcome, INodeNo, IdMap,
+    KernelConfig, ReplyAttr, ReplyCreate, ReplyDirectoryPlus, ReplyEntry, ReplySender, Request,
+    RequestWithSender, SessionACL, TimeOrNow, Uid,
 };
 
 const MAPPING: FilesystemMapping = FilesystemMapping {
@@ -405,21 +405,23 @@ fn init_credentials_and_default_identity() {
 }
 
 #[test]
-fn dispatch_destroy_returns_destroyed_and_acknowledges_request() {
+fn identifies_destroy_before_dispatch_acknowledges_request() {
     let fs = Probe::new(MAPPING);
     let packet = packet(38, &[]);
     let (sender, rx) = sender();
-    let outcome = RequestWithSender::new(sender, packet.as_slice().as_bytes())
+    let request = RequestWithSender::new(sender, packet.as_slice().as_bytes())
         .unwrap()
-        .with_mapping(MAPPING)
-        .dispatch(&DispatchContext {
-            filesystem: &fs,
-            allowed: SessionACL::All,
-            session_owner: Uid::from_raw(0),
-            thread_name: "mapping-test",
-        });
+        .with_mapping(MAPPING);
+    assert!(request.is_destroy());
+    assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    request.dispatch(&DispatchContext {
+        filesystem: &fs,
+        allowed: SessionACL::All,
+        session_owner: Uid::from_raw(0),
+        thread_name: "mapping-test",
+    });
 
-    assert_eq!(outcome, DispatchOutcome::Destroyed);
+    drop(request);
     let reply = rx.recv_timeout(Duration::from_secs(1)).unwrap();
     assert_eq!(reply.len(), 16);
     assert_eq!(i32::from_ne_bytes(reply[4..8].try_into().unwrap()), 0);
@@ -478,20 +480,21 @@ fn handshake_replies_eio_for_getattr_before_init() {
 }
 
 #[test]
-fn dispatch_lookup_returns_served() {
+fn lookup_is_not_destroy() {
     let fs = Probe::new(MAPPING);
     let packet = packet(1, b"entry\0");
     let (sender, rx) = sender();
-    let outcome = RequestWithSender::new(sender, packet.as_slice().as_bytes())
+    let request = RequestWithSender::new(sender, packet.as_slice().as_bytes())
         .unwrap()
-        .with_mapping(MAPPING)
-        .dispatch(&DispatchContext {
-            filesystem: &fs,
-            allowed: SessionACL::All,
-            session_owner: Uid::from_raw(0),
-            thread_name: "mapping-test",
-        });
+        .with_mapping(MAPPING);
+    assert!(!request.is_destroy());
+    request.dispatch(&DispatchContext {
+        filesystem: &fs,
+        allowed: SessionACL::All,
+        session_owner: Uid::from_raw(0),
+        thread_name: "mapping-test",
+    });
 
-    assert_eq!(outcome, DispatchOutcome::Served);
+    drop(request);
     receive(rx);
 }

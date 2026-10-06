@@ -1,7 +1,7 @@
 # FUSE for Rust - Changelog
 
 ## Unreleased
-* Report acknowledged FUSE_DESTROY requests through custom transport dispatch
+* Expose FUSE_DESTROY detection before custom transport dispatch acknowledges it
   and ignore pre-init FORGET requests that do not take a reply
 * Add opt-in `FilesystemMapping` for custom transports to translate request and
   reply ownership IDs without changing filesystem handlers. Existing sessions

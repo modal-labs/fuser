@@ -46,7 +46,6 @@ use crate::read_buf::FuseReadBuf;
 use crate::reply::Reply;
 use crate::reply::ReplyRaw;
 use crate::reply::ReplySender;
-use crate::request::DispatchOutcome;
 use crate::request::RequestWithSender;
 
 /// The max size of write requests from the kernel. The absolute minimum is 4k,
@@ -627,7 +626,9 @@ impl<FS: Filesystem> SessionEventLoop<FS> {
                 ) {
                     // Dispatch request
                     Some(req) => {
-                        if req.dispatch(&cx) == DispatchOutcome::Destroyed {
+                        let is_destroy = req.is_destroy();
+                        req.dispatch(&cx);
+                        if is_destroy {
                             return Ok(());
                         }
                     }
