@@ -1,6 +1,10 @@
 # FUSE for Rust - Changelog
 
 ## Unreleased
+* Add `ReplyEntry::entry_with_nodeid()`, `ReplyCreate::created_with_nodeid()` and
+  `ReplyCreate::created_passthrough_with_nodeid()` to reply with a nodeid other than `attr.ino`
+* `ReplyDirectoryPlus::add()` now sends its `ino` argument as the entry's nodeid instead of
+  ignoring it in favour of `attr.ino`
 * Expose FUSE_DESTROY detection before custom transport dispatch acknowledges it
 * Expose FUSE_INIT detection so custom transports can route the handshake
 * Add opt-in `FilesystemMapping` for custom transports to translate request and

@@ -313,13 +313,7 @@ impl Reply for ReplyEntry {
 impl ReplyEntry {
     /// Reply to a request with the given entry
     pub fn entry(self, ttl: &Duration, attr: &FileAttr, generation: Generation) {
-        self.reply.send_ll(&ll::ResponseStruct::new_entry(
-            attr.ino,
-            generation,
-            &ll::reply::Attr::with_mapping(attr, self.mapping),
-            *ttl,
-            *ttl,
-        ));
+        self.entry_with_nodeid(attr.ino, ttl, ttl, attr, generation);
     }
 
     /// Reply to a request with the given entry.
@@ -340,8 +334,22 @@ impl ReplyEntry {
         attr: &FileAttr,
         generation: Generation,
     ) {
+        self.entry_with_nodeid(attr.ino, attr_ttl, entry_ttl, attr, generation);
+    }
+
+    /// Reply to a request with the given entry and TTLs, using `nodeid` as the
+    /// entry's nodeid. The kernel addresses later requests for the entry by
+    /// `nodeid` and reports `attr.ino` as its `st_ino`.
+    pub fn entry_with_nodeid(
+        self,
+        nodeid: INodeNo,
+        attr_ttl: &Duration,
+        entry_ttl: &Duration,
+        attr: &FileAttr,
+        generation: Generation,
+    ) {
         self.reply.send_ll(&ll::ResponseStruct::new_entry(
-            attr.ino,
+            nodeid,
             generation,
             &ll::reply::Attr::with_mapping(attr, self.mapping),
             *attr_ttl,
@@ -602,14 +610,46 @@ impl ReplyCreate {
         fh: ll::FileHandle,
         flags: FopenFlags,
     ) {
+        self.created_with_nodeid(attr.ino, ttl, attr, generation, fh, flags);
+    }
+
+    /// Like [`ReplyCreate::created()`], but using `nodeid` as the entry's nodeid.
+    /// The kernel addresses later requests for the entry by `nodeid` and reports
+    /// `attr.ino` as its `st_ino`.
+    /// # Panics
+    /// When attempting to use kernel passthrough. Use `created_passthrough_with_nodeid()` instead.
+    pub fn created_with_nodeid(
+        self,
+        nodeid: INodeNo,
+        ttl: &Duration,
+        attr: &FileAttr,
+        generation: Generation,
+        fh: ll::FileHandle,
+        flags: FopenFlags,
+    ) {
         assert!(!flags.contains(FopenFlags::FOPEN_PASSTHROUGH));
+        self.send_created(nodeid, ttl, attr, generation, fh, flags, 0);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn send_created(
+        self,
+        nodeid: INodeNo,
+        ttl: &Duration,
+        attr: &FileAttr,
+        generation: Generation,
+        fh: ll::FileHandle,
+        flags: FopenFlags,
+        backing_id: u32,
+    ) {
         self.reply.send_ll(&ll::ResponseStruct::new_create(
+            nodeid,
             ttl,
             &ll::reply::Attr::with_mapping(attr, self.mapping),
             generation,
             fh,
             flags,
-            0,
+            backing_id,
         ));
     }
 
@@ -656,14 +696,34 @@ impl ReplyCreate {
         flags: FopenFlags,
         backing_id: &BackingId,
     ) {
-        self.reply.send_ll(&ll::ResponseStruct::new_create(
+        self.created_passthrough_with_nodeid(
+            attr.ino, ttl, attr, generation, fh, flags, backing_id,
+        );
+    }
+
+    /// Like [`ReplyCreate::created_passthrough()`], but using `nodeid` as the
+    /// entry's nodeid. The kernel addresses later requests for the entry by
+    /// `nodeid` and reports `attr.ino` as its `st_ino`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn created_passthrough_with_nodeid(
+        self,
+        nodeid: INodeNo,
+        ttl: &Duration,
+        attr: &FileAttr,
+        generation: Generation,
+        fh: ll::FileHandle,
+        flags: FopenFlags,
+        backing_id: &BackingId,
+    ) {
+        self.send_created(
+            nodeid,
             ttl,
-            &ll::reply::Attr::with_mapping(attr, self.mapping),
+            attr,
             generation,
             fh,
             flags | FopenFlags::FOPEN_PASSTHROUGH,
             backing_id.backing_id,
-        ));
+        );
     }
 }
 
@@ -861,7 +921,10 @@ impl ReplyDirectoryPlus {
 
     /// Add an entry to the directory reply buffer. Returns true if the buffer is full.
     /// A transparent offset value can be provided for each entry. The kernel uses these
-    /// value to request the next entries in further readdir calls
+    /// value to request the next entries in further readdir calls.
+    ///
+    /// `ino` is the entry's nodeid, by which the kernel addresses later requests
+    /// for it. The kernel reports `attr.ino` as the entry's `st_ino` and `d_ino`.
     pub fn add<T: AsRef<OsStr>>(
         &mut self,
         ino: INodeNo,
