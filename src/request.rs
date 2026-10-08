@@ -10,6 +10,7 @@ use std::path::Path;
 
 use log::debug;
 use log::error;
+use zerocopy::IntoBytes;
 
 use crate::Filesystem;
 use crate::FilesystemMapping;
@@ -21,6 +22,9 @@ use crate::ll;
 use crate::ll::Errno;
 use crate::ll::ResponseData;
 use crate::ll::ResponseErrno;
+use crate::ll::Version;
+use crate::ll::flags::init_flags::InitFlags;
+use crate::ll::fuse_abi::{fuse_in_header, fuse_init_in, fuse_opcode};
 use crate::reply::Reply;
 use crate::reply::ReplyDirectory;
 use crate::reply::ReplyDirectoryPlus;
@@ -569,5 +573,59 @@ impl<'a> RequestWithSender<'a> {
     /// implementation and makes sure that a request is replied exactly once
     pub(crate) fn reply<T: Reply>(&self) -> T {
         T::new(self.request.unique(), self.sender.clone()).with_mapping(self.mapping)
+    }
+}
+
+/// A FUSE_INIT request as the kernel sends it, for transports that run a
+/// filesystem's handshake themselves and for their tests.
+///
+/// The storage is 64-bit words, which keeps the header aligned for parsing.
+#[derive(Debug, Clone)]
+pub struct InitRequest(Vec<u64>);
+
+impl InitRequest {
+    /// An INIT for protocol `version` advertising `capabilities`.
+    ///
+    /// Capabilities beyond the first 32 bits travel in the extended flags
+    /// word, which the kernel marks with `FUSE_INIT_EXT`; the request sets
+    /// that flag whenever it uses the word.
+    pub fn new(version: Version, capabilities: InitFlags) -> Self {
+        let (_, high) = capabilities.pair();
+        let capabilities = if high == 0 {
+            capabilities
+        } else {
+            capabilities | InitFlags::FUSE_INIT_EXT
+        };
+        let (flags, flags2) = capabilities.pair();
+        let header_len = size_of::<fuse_in_header>();
+        let len = header_len + size_of::<fuse_init_in>();
+        let header = fuse_in_header {
+            len: len as u32,
+            opcode: fuse_opcode::FUSE_INIT as u32,
+            unique: 1,
+            nodeid: 0,
+            uid: 0,
+            gid: 0,
+            pid: 0,
+            padding: 0,
+        };
+        let body = fuse_init_in {
+            major: version.0,
+            minor: version.1,
+            max_readahead: 0,
+            flags,
+            flags2,
+            unused: [0; 11],
+        };
+        let mut words = vec![0u64; len.div_ceil(8)];
+        let bytes = words.as_mut_slice().as_mut_bytes();
+        bytes[..header_len].copy_from_slice(header.as_bytes());
+        bytes[header_len..len].copy_from_slice(body.as_bytes());
+        Self(words)
+    }
+
+    /// The request bytes, as a transport receives them.
+    pub fn as_bytes(&self) -> &[u8] {
+        self.0.as_slice().as_bytes()
     }
 }

@@ -11,8 +11,8 @@ use crate::ll::fuse_abi as abi;
 use crate::{
     BackingId, BsdFileFlags, CustomReplySender, DispatchContext, FileAttr, FileHandle, FileType,
     Filesystem, FilesystemMapping, FopenFlags, Generation, HandshakeOutcome, INodeNo, IdMap,
-    KernelConfig, ReplyAttr, ReplyCreate, ReplyDirectoryPlus, ReplyEntry, ReplySender, Request,
-    RequestWithSender, SessionACL, TimeOrNow, Uid,
+    InitFlags, InitRequest, KernelConfig, ReplyAttr, ReplyCreate, ReplyDirectoryPlus, ReplyEntry,
+    ReplySender, Request, RequestWithSender, SessionACL, TimeOrNow, Uid, Version,
 };
 
 const MAPPING: FilesystemMapping = FilesystemMapping {
@@ -406,20 +406,49 @@ fn init_credentials_and_default_identity() {
 
 #[test]
 fn session_boundaries_are_identified_before_dispatch() {
-    // A `fuse_init_in` for protocol 7.31; the other requests carry no body.
-    let mut init_body = [0u8; 64];
-    init_body[..4].copy_from_slice(&7u32.to_ne_bytes());
-    init_body[4..8].copy_from_slice(&31u32.to_ne_bytes());
-    for (opcode, body, init, destroy) in [
-        (26, &init_body[..], true, false),
-        (38, &[][..], false, true),
-        (17, &[][..], false, false),
+    let init = InitRequest::new(Version(7, 31), InitFlags::empty());
+    for (name, bytes, is_init, is_destroy) in [
+        ("INIT", init.as_bytes().to_vec(), true, false),
+        (
+            "DESTROY",
+            packet(38, &[]).as_slice().as_bytes().to_vec(),
+            false,
+            true,
+        ),
+        (
+            "STATFS",
+            packet(17, &[]).as_slice().as_bytes().to_vec(),
+            false,
+            false,
+        ),
     ] {
-        let packet = packet(opcode, body);
+        // Copy back into word storage so the header is aligned for parsing.
+        let mut words = vec![0u64; bytes.len().div_ceil(8)];
+        words.as_mut_slice().as_mut_bytes()[..bytes.len()].copy_from_slice(&bytes);
         let (sender, _rx) = sender();
-        let request = RequestWithSender::new(sender, packet.as_slice().as_bytes()).unwrap();
-        assert_eq!(request.is_init(), init, "opcode {opcode}");
-        assert_eq!(request.is_destroy(), destroy, "opcode {opcode}");
+        let request =
+            RequestWithSender::new(sender, &words.as_slice().as_bytes()[..bytes.len()]).unwrap();
+        assert_eq!(request.is_init(), is_init, "{name}");
+        assert_eq!(request.is_destroy(), is_destroy, "{name}");
+    }
+}
+
+#[test]
+fn init_request_advertises_capabilities_in_both_flag_words() {
+    let low = InitFlags::FUSE_ATOMIC_O_TRUNC | InitFlags::FUSE_DO_READDIRPLUS;
+    let high = InitFlags::FUSE_HAS_INODE_DAX;
+    for (capabilities, expected) in [
+        (low, low),
+        (low | high, low | high | InitFlags::FUSE_INIT_EXT),
+    ] {
+        let init = InitRequest::new(Version(7, 36), capabilities);
+        let (sender, _rx) = sender();
+        let request = RequestWithSender::new(sender, init.as_bytes()).unwrap();
+        let Ok(crate::ll::Operation::Init(parsed)) = request.request.operation() else {
+            panic!("not an INIT");
+        };
+        assert_eq!(parsed.version(), Version(7, 36));
+        assert_eq!(parsed.capabilities(), expected);
     }
 }
 

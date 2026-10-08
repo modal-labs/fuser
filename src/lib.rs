@@ -77,6 +77,7 @@ pub use crate::reply::ReplySender;
 pub use crate::reply::ReplyStatfs;
 pub use crate::reply::ReplyWrite;
 pub use crate::reply::ReplyXattr;
+pub use crate::request::InitRequest;
 pub use crate::request::RequestWithSender;
 pub use crate::request_param::Request;
 pub use crate::session::BackgroundSession;

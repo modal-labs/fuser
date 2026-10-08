@@ -3,6 +3,7 @@
 ## Unreleased
 * Expose FUSE_DESTROY detection before custom transport dispatch acknowledges it
 * Expose FUSE_INIT detection so custom transports can route the handshake
+* Add `InitRequest`, a FUSE_INIT request builder for transports and their tests
 * Add opt-in `FilesystemMapping` for custom transports to translate request and
   reply ownership IDs without changing filesystem handlers. Existing sessions
   retain identity mapping.
