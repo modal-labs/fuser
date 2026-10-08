@@ -405,6 +405,25 @@ fn init_credentials_and_default_identity() {
 }
 
 #[test]
+fn session_boundaries_are_identified_before_dispatch() {
+    // A `fuse_init_in` for protocol 7.31; the other requests carry no body.
+    let mut init_body = [0u8; 64];
+    init_body[..4].copy_from_slice(&7u32.to_ne_bytes());
+    init_body[4..8].copy_from_slice(&31u32.to_ne_bytes());
+    for (opcode, body, init, destroy) in [
+        (26, &init_body[..], true, false),
+        (38, &[][..], false, true),
+        (17, &[][..], false, false),
+    ] {
+        let packet = packet(opcode, body);
+        let (sender, _rx) = sender();
+        let request = RequestWithSender::new(sender, packet.as_slice().as_bytes()).unwrap();
+        assert_eq!(request.is_init(), init, "opcode {opcode}");
+        assert_eq!(request.is_destroy(), destroy, "opcode {opcode}");
+    }
+}
+
+#[test]
 fn dispatch_acknowledges_destroy() {
     let mapping = FilesystemMapping::default();
     let fs = Probe::new(mapping);

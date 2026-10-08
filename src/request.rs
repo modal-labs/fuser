@@ -79,6 +79,14 @@ impl<'a> RequestWithSender<'a> {
         matches!(self.request.operation(), Ok(ll::Operation::Destroy(_)))
     }
 
+    /// Whether this request begins a FUSE session.
+    ///
+    /// Transports route it to the handshake, which needs exclusive access to
+    /// the filesystem, instead of dispatching it.
+    pub fn is_init(&self) -> bool {
+        matches!(self.request.operation(), Ok(ll::Operation::Init(_)))
+    }
+
     /// Dispatch request to the given filesystem.
     /// This calls the appropriate filesystem operation method for the
     /// request and sends back the returned reply to the kernel
