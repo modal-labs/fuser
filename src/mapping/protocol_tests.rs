@@ -83,6 +83,7 @@ struct Probe {
     mapping: FilesystemMapping,
     deferred: Mutex<Option<ReplyAttr>>,
     ownership: Mutex<Option<(Option<u32>, Option<u32>)>>,
+    backlog: Mutex<Option<bool>>,
 }
 
 impl Probe {
@@ -91,6 +92,7 @@ impl Probe {
             mapping,
             deferred: Mutex::new(None),
             ownership: Mutex::new(None),
+            backlog: Mutex::new(None),
         }
     }
 
@@ -119,6 +121,7 @@ impl Filesystem for Probe {
 
     fn getattr(&self, req: &Request, _ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
         self.check_credentials(req);
+        *self.backlog.lock().unwrap() = Some(req.has_backlog());
         *self.deferred.lock().unwrap() = Some(reply);
     }
 
@@ -420,6 +423,33 @@ fn session_boundaries_are_identified_before_dispatch() {
         let request = RequestWithSender::new(sender, packet.as_slice().as_bytes()).unwrap();
         assert_eq!(request.is_init(), init, "opcode {opcode}");
         assert_eq!(request.is_destroy(), destroy, "opcode {opcode}");
+    }
+}
+
+#[test]
+fn request_backlog_is_visible_to_filesystem_callback() {
+    for backlog in [false, true] {
+        let fs = Probe::new(FilesystemMapping::default());
+        let packet = packet(3, &[0; 16]);
+        let (sender, rx) = sender();
+        RequestWithSender::new(sender, packet.as_slice().as_bytes())
+            .unwrap()
+            .with_backlog(backlog)
+            .dispatch(&DispatchContext {
+                filesystem: &fs,
+                allowed: SessionACL::All,
+                session_owner: Uid::from_raw(0),
+                thread_name: "mapping-test",
+            });
+
+        assert_eq!(*fs.backlog.lock().unwrap(), Some(backlog));
+        fs.deferred
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap()
+            .attr(&TTL, &attr());
+        receive(rx);
     }
 }
 

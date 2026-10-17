@@ -505,7 +505,7 @@ pub fn handshake_request_with_mapping<FS: Filesystem>(
 
     // Call filesystem init method and give it a chance to return an error
     if let Err(error) = filesystem.init(
-        &Request::from_header(request.header(), mapping),
+        &Request::from_header(request.header(), mapping, false),
         &mut config,
     ) {
         let errno = Errno::from_i32(error.raw_os_error().unwrap_or(0));
@@ -613,26 +613,31 @@ impl<FS: Filesystem> SessionEventLoop<FS> {
             // Read the next request from the given channel to kernel driver
             // The kernel driver makes sure that we get exactly one request per read
             match self.ch.receive_retrying(buf) {
-                Ok(size) => match RequestWithSender::new(
-                    ReplySender::channel(self.ch.sender()),
-                    &buf[..size],
-                ) {
-                    // Dispatch request
-                    Some(req) => {
-                        let is_destroy = req.is_destroy();
-                        req.dispatch(&cx);
-                        if is_destroy {
-                            return Ok(());
+                Ok(size) => {
+                    let backlog = self.ch.has_pending();
+                    match RequestWithSender::new(
+                        ReplySender::channel(self.ch.sender()),
+                        &buf[..size],
+                    )
+                    .map(|request| request.with_backlog(backlog))
+                    {
+                        // Dispatch request
+                        Some(req) => {
+                            let is_destroy = req.is_destroy();
+                            req.dispatch(&cx);
+                            if is_destroy {
+                                return Ok(());
+                            }
+                        }
+                        // Quit loop on illegal request
+                        None => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "Invalid request",
+                            ));
                         }
                     }
-                    // Quit loop on illegal request
-                    None => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "Invalid request",
-                        ));
-                    }
-                },
+                }
                 Err(nix::errno::Errno::ENODEV) => return Ok(()),
                 Err(err) => return Err(err.into()),
             }

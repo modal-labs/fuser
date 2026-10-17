@@ -4,6 +4,10 @@ use std::os::fd::BorrowedFd;
 use std::sync::Arc;
 
 use nix::errno::Errno;
+use nix::poll::PollFd;
+use nix::poll::PollFlags;
+use nix::poll::PollTimeout;
+use nix::poll::poll;
 
 use crate::dev_fuse::DevFuse;
 use crate::passthrough::BackingId;
@@ -47,6 +51,10 @@ impl Channel {
         }
     }
 
+    pub(crate) fn has_pending(&self) -> bool {
+        fd_has_pending(self)
+    }
+
     /// Returns a sender object for this channel. The sender object can be
     /// used to send to the channel. Multiple sender objects can be used
     /// and they can safely be sent to other threads.
@@ -76,6 +84,33 @@ impl Channel {
         }
 
         Ok(Channel::new(Arc::new(new_dev)))
+    }
+}
+
+fn fd_has_pending(fd: impl AsFd) -> bool {
+    let mut descriptors = [PollFd::new(fd.as_fd(), PollFlags::POLLIN)];
+    poll(&mut descriptors, PollTimeout::ZERO)
+        .map(|_| {
+            descriptors[0]
+                .revents()
+                .is_some_and(|events| events.contains(PollFlags::POLLIN))
+        })
+        .unwrap_or(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use nix::unistd::pipe;
+    use nix::unistd::write;
+
+    use super::fd_has_pending;
+
+    #[test]
+    fn fd_has_pending_detects_readable_descriptors() {
+        let (read_fd, write_fd) = pipe().unwrap();
+        assert!(!fd_has_pending(&read_fd));
+        assert_eq!(write(&write_fd, b"x").unwrap(), 1);
+        assert!(fd_has_pending(&read_fd));
     }
 }
 

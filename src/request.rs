@@ -41,6 +41,7 @@ pub struct RequestWithSender<'a> {
     /// Parsed request
     pub(crate) request: ll::AnyRequest<'a>,
     mapping: FilesystemMapping,
+    backlog: bool,
 }
 
 impl<'a> RequestWithSender<'a> {
@@ -60,6 +61,7 @@ impl<'a> RequestWithSender<'a> {
             sender,
             request,
             mapping: FilesystemMapping::default(),
+            backlog: false,
         })
     }
 
@@ -69,6 +71,12 @@ impl<'a> RequestWithSender<'a> {
     /// Session ACL checks still use the original client credentials.
     pub fn with_mapping(mut self, mapping: FilesystemMapping) -> Self {
         self.mapping = mapping;
+        self
+    }
+
+    /// Set whether other requests are queued behind this request.
+    pub fn with_backlog(mut self, backlog: bool) -> Self {
+        self.backlog = backlog;
         self
     }
 
@@ -141,7 +149,7 @@ impl<'a> RequestWithSender<'a> {
         }
 
         let filesystem = se.filesystem;
-        let request = Request::from_header(self.request.header(), self.mapping);
+        let request = Request::from_header(self.request.header(), self.mapping, self.backlog);
 
         match op {
             // Filesystem initialization - should not happen after handshake completed
