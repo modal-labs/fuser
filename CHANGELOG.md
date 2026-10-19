@@ -1,7 +1,7 @@
 # FUSE for Rust - Changelog
 
 ## Unreleased
-* Expose whether more FUSE requests were queued when a request was dispatched
+* Add `Request::has_backlog()`, reporting whether more FUSE requests are queued on the transport
 * Add `ReplyEntry::entry_with_nodeid()`, `ReplyCreate::created_with_nodeid()` and
   `ReplyCreate::created_passthrough_with_nodeid()` to reply with a nodeid other than `attr.ino`
 * `ReplyDirectoryPlus::add()` now sends its `ino` argument as the entry's nodeid instead of

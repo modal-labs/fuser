@@ -51,10 +51,6 @@ impl Channel {
         }
     }
 
-    pub(crate) fn has_pending(&self) -> bool {
-        fd_has_pending(self)
-    }
-
     /// Returns a sender object for this channel. The sender object can be
     /// used to send to the channel. Multiple sender objects can be used
     /// and they can safely be sent to other threads.
@@ -118,6 +114,10 @@ mod tests {
 pub(crate) struct ChannelSender(Arc<DevFuse>);
 
 impl ChannelSender {
+    pub(crate) fn has_pending(&self) -> bool {
+        fd_has_pending(self.0.as_ref())
+    }
+
     pub(crate) fn send(&self, bufs: &[io::IoSlice<'_>]) -> io::Result<()> {
         let rc = nix::sys::uio::writev(&self.0, bufs)?;
         // writev is atomic, so do not need to check how many bytes are written.

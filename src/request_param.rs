@@ -1,19 +1,26 @@
 use crate::FilesystemMapping;
+use crate::channel::ChannelSender;
 use crate::ll;
 use crate::ll::fuse_abi::fuse_in_header;
+
+#[derive(Clone, Debug)]
+pub(crate) enum Backlog {
+    Known(bool),
+    Poll(ChannelSender),
+}
 
 /// FUSE request parameters.
 #[derive(Debug)]
 pub struct Request {
     header: fuse_in_header,
-    backlog: bool,
+    backlog: Backlog,
 }
 
 impl Request {
     pub(crate) fn from_header(
         header: &fuse_in_header,
         mapping: FilesystemMapping,
-        backlog: bool,
+        backlog: Backlog,
     ) -> Self {
         Self {
             header: fuse_in_header {
@@ -25,12 +32,16 @@ impl Request {
         }
     }
 
-    /// Returns whether more requests were already queued on the transport when this
-    /// request was dispatched. Filesystems can use it to decide whether blocking
-    /// briefly on the request thread delays other requests.
+    /// Returns whether more requests are currently queued on the transport. Each call
+    /// checks the transport, so filesystems should call it right before the decision
+    /// it informs. Filesystems can use it to decide whether blocking briefly on the
+    /// request thread delays other requests.
     #[inline]
     pub fn has_backlog(&self) -> bool {
-        self.backlog
+        match &self.backlog {
+            Backlog::Known(backlog) => *backlog,
+            Backlog::Poll(channel) => channel.has_pending(),
+        }
     }
 
     /// Returns the unique identifier of this request

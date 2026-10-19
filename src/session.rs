@@ -47,6 +47,7 @@ use crate::reply::Reply;
 use crate::reply::ReplyRaw;
 use crate::reply::ReplySender;
 use crate::request::RequestWithSender;
+use crate::request_param::Backlog;
 
 /// The max size of write requests from the kernel. The absolute minimum is 4k,
 /// FUSE recommends at least 128k, max 16M. The FUSE default is 16M on macOS
@@ -505,7 +506,7 @@ pub fn handshake_request_with_mapping<FS: Filesystem>(
 
     // Call filesystem init method and give it a chance to return an error
     if let Err(error) = filesystem.init(
-        &Request::from_header(request.header(), mapping, false),
+        &Request::from_header(request.header(), mapping, Backlog::Known(false)),
         &mut config,
     ) {
         let errno = Errno::from_i32(error.raw_os_error().unwrap_or(0));
@@ -614,12 +615,11 @@ impl<FS: Filesystem> SessionEventLoop<FS> {
             // The kernel driver makes sure that we get exactly one request per read
             match self.ch.receive_retrying(buf) {
                 Ok(size) => {
-                    let backlog = self.ch.has_pending();
                     match RequestWithSender::new(
                         ReplySender::channel(self.ch.sender()),
                         &buf[..size],
                     )
-                    .map(|request| request.with_backlog(backlog))
+                    .map(|request| request.with_backlog_poll(self.ch.sender()))
                     {
                         // Dispatch request
                         Some(req) => {
