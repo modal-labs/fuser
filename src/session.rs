@@ -363,7 +363,13 @@ impl<FS: Filesystem> Session<FS> {
                 ));
             };
 
-            match handshake_request(filesystem, sender, &buf[..size])? {
+            match handshake_request_with_mapping_and_backlog(
+                filesystem,
+                sender,
+                &buf[..size],
+                FilesystemMapping::default(),
+                Backlog::Poll(self.ch.sender()),
+            )? {
                 HandshakeOutcome::NeedAnotherInit => continue,
                 HandshakeOutcome::Complete {
                     proto_version,
@@ -449,6 +455,22 @@ pub fn handshake_request_with_mapping<FS: Filesystem>(
     data: &[u8],
     mapping: FilesystemMapping,
 ) -> io::Result<HandshakeOutcome> {
+    handshake_request_with_mapping_and_backlog(
+        filesystem,
+        sender,
+        data,
+        mapping,
+        Backlog::Known(false),
+    )
+}
+
+fn handshake_request_with_mapping_and_backlog<FS: Filesystem>(
+    filesystem: &mut FS,
+    sender: ReplySender,
+    data: &[u8],
+    mapping: FilesystemMapping,
+    backlog: Backlog,
+) -> io::Result<HandshakeOutcome> {
     let request = match ll::AnyRequest::try_from(data) {
         Ok(request) => request,
         Err(err) => {
@@ -506,7 +528,7 @@ pub fn handshake_request_with_mapping<FS: Filesystem>(
 
     // Call filesystem init method and give it a chance to return an error
     if let Err(error) = filesystem.init(
-        &Request::from_header(request.header(), mapping, Backlog::Known(false)),
+        &Request::from_header(request.header(), mapping, backlog),
         &mut config,
     ) {
         let errno = Errno::from_i32(error.raw_os_error().unwrap_or(0));

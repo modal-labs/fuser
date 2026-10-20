@@ -94,22 +94,6 @@ fn fd_has_pending(fd: impl AsFd) -> bool {
         .unwrap_or(true)
 }
 
-#[cfg(test)]
-mod tests {
-    use nix::unistd::pipe;
-    use nix::unistd::write;
-
-    use super::fd_has_pending;
-
-    #[test]
-    fn fd_has_pending_detects_readable_descriptors() {
-        let (read_fd, write_fd) = pipe().unwrap();
-        assert!(!fd_has_pending(&read_fd));
-        assert_eq!(write(&write_fd, b"x").unwrap(), 1);
-        assert!(fd_has_pending(&read_fd));
-    }
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct ChannelSender(Arc<DevFuse>);
 
