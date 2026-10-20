@@ -16,6 +16,7 @@ use crate::FilesystemMapping;
 use crate::PollNotifier;
 use crate::RenameFlags;
 use crate::Request;
+use crate::channel::ChannelSender;
 use crate::forget_one::ForgetOne;
 use crate::ll;
 use crate::ll::Errno;
@@ -27,6 +28,7 @@ use crate::reply::ReplyDirectoryPlus;
 use crate::reply::ReplyEmpty;
 use crate::reply::ReplyRaw;
 use crate::reply::ReplySender;
+use crate::request_param::Backlog;
 use crate::session::DispatchContext;
 use crate::session::SessionACL;
 
@@ -41,6 +43,7 @@ pub struct RequestWithSender<'a> {
     /// Parsed request
     pub(crate) request: ll::AnyRequest<'a>,
     mapping: FilesystemMapping,
+    backlog: Backlog,
 }
 
 impl<'a> RequestWithSender<'a> {
@@ -60,6 +63,7 @@ impl<'a> RequestWithSender<'a> {
             sender,
             request,
             mapping: FilesystemMapping::default(),
+            backlog: Backlog::Known(false),
         })
     }
 
@@ -69,6 +73,17 @@ impl<'a> RequestWithSender<'a> {
     /// Session ACL checks still use the original client credentials.
     pub fn with_mapping(mut self, mapping: FilesystemMapping) -> Self {
         self.mapping = mapping;
+        self
+    }
+
+    /// Set whether other requests are queued behind this request.
+    pub fn with_backlog(mut self, backlog: bool) -> Self {
+        self.backlog = Backlog::Known(backlog);
+        self
+    }
+
+    pub(crate) fn with_backlog_poll(mut self, channel: ChannelSender) -> Self {
+        self.backlog = Backlog::Poll(channel);
         self
     }
 
@@ -141,7 +156,8 @@ impl<'a> RequestWithSender<'a> {
         }
 
         let filesystem = se.filesystem;
-        let request = Request::from_header(self.request.header(), self.mapping);
+        let request =
+            Request::from_header(self.request.header(), self.mapping, self.backlog.clone());
 
         match op {
             // Filesystem initialization - should not happen after handshake completed

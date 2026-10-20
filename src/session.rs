@@ -47,6 +47,7 @@ use crate::reply::Reply;
 use crate::reply::ReplyRaw;
 use crate::reply::ReplySender;
 use crate::request::RequestWithSender;
+use crate::request_param::Backlog;
 
 /// The max size of write requests from the kernel. The absolute minimum is 4k,
 /// FUSE recommends at least 128k, max 16M. The FUSE default is 16M on macOS
@@ -362,7 +363,13 @@ impl<FS: Filesystem> Session<FS> {
                 ));
             };
 
-            match handshake_request(filesystem, sender, &buf[..size])? {
+            match handshake_request_with_mapping_and_backlog(
+                filesystem,
+                sender,
+                &buf[..size],
+                FilesystemMapping::default(),
+                Backlog::Poll(self.ch.sender()),
+            )? {
                 HandshakeOutcome::NeedAnotherInit => continue,
                 HandshakeOutcome::Complete {
                     proto_version,
@@ -448,6 +455,22 @@ pub fn handshake_request_with_mapping<FS: Filesystem>(
     data: &[u8],
     mapping: FilesystemMapping,
 ) -> io::Result<HandshakeOutcome> {
+    handshake_request_with_mapping_and_backlog(
+        filesystem,
+        sender,
+        data,
+        mapping,
+        Backlog::Known(false),
+    )
+}
+
+fn handshake_request_with_mapping_and_backlog<FS: Filesystem>(
+    filesystem: &mut FS,
+    sender: ReplySender,
+    data: &[u8],
+    mapping: FilesystemMapping,
+    backlog: Backlog,
+) -> io::Result<HandshakeOutcome> {
     let request = match ll::AnyRequest::try_from(data) {
         Ok(request) => request,
         Err(err) => {
@@ -505,7 +528,7 @@ pub fn handshake_request_with_mapping<FS: Filesystem>(
 
     // Call filesystem init method and give it a chance to return an error
     if let Err(error) = filesystem.init(
-        &Request::from_header(request.header(), mapping),
+        &Request::from_header(request.header(), mapping, backlog),
         &mut config,
     ) {
         let errno = Errno::from_i32(error.raw_os_error().unwrap_or(0));
@@ -613,26 +636,30 @@ impl<FS: Filesystem> SessionEventLoop<FS> {
             // Read the next request from the given channel to kernel driver
             // The kernel driver makes sure that we get exactly one request per read
             match self.ch.receive_retrying(buf) {
-                Ok(size) => match RequestWithSender::new(
-                    ReplySender::channel(self.ch.sender()),
-                    &buf[..size],
-                ) {
-                    // Dispatch request
-                    Some(req) => {
-                        let is_destroy = req.is_destroy();
-                        req.dispatch(&cx);
-                        if is_destroy {
-                            return Ok(());
+                Ok(size) => {
+                    match RequestWithSender::new(
+                        ReplySender::channel(self.ch.sender()),
+                        &buf[..size],
+                    )
+                    .map(|request| request.with_backlog_poll(self.ch.sender()))
+                    {
+                        // Dispatch request
+                        Some(req) => {
+                            let is_destroy = req.is_destroy();
+                            req.dispatch(&cx);
+                            if is_destroy {
+                                return Ok(());
+                            }
+                        }
+                        // Quit loop on illegal request
+                        None => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "Invalid request",
+                            ));
                         }
                     }
-                    // Quit loop on illegal request
-                    None => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "Invalid request",
-                        ));
-                    }
-                },
+                }
                 Err(nix::errno::Errno::ENODEV) => return Ok(()),
                 Err(err) => return Err(err.into()),
             }

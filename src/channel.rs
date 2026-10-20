@@ -4,6 +4,10 @@ use std::os::fd::BorrowedFd;
 use std::sync::Arc;
 
 use nix::errno::Errno;
+use nix::poll::PollFd;
+use nix::poll::PollFlags;
+use nix::poll::PollTimeout;
+use nix::poll::poll;
 
 use crate::dev_fuse::DevFuse;
 use crate::passthrough::BackingId;
@@ -79,10 +83,25 @@ impl Channel {
     }
 }
 
+fn fd_has_pending(fd: impl AsFd) -> bool {
+    let mut descriptors = [PollFd::new(fd.as_fd(), PollFlags::POLLIN)];
+    poll(&mut descriptors, PollTimeout::ZERO)
+        .map(|_| {
+            descriptors[0]
+                .revents()
+                .is_some_and(|events| events.contains(PollFlags::POLLIN))
+        })
+        .unwrap_or(true)
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct ChannelSender(Arc<DevFuse>);
 
 impl ChannelSender {
+    pub(crate) fn has_pending(&self) -> bool {
+        fd_has_pending(self.0.as_ref())
+    }
+
     pub(crate) fn send(&self, bufs: &[io::IoSlice<'_>]) -> io::Result<()> {
         let rc = nix::sys::uio::writev(&self.0, bufs)?;
         // writev is atomic, so do not need to check how many bytes are written.
