@@ -433,10 +433,16 @@ fn dispatch_acknowledges_destroy() {
     assert_eq!(i32::from_ne_bytes(reply[4..8].try_into().unwrap()), 0);
 }
 
-#[test]
-fn dispatch_rejects_setxattr_with_mismatched_size() {
+fn assert_dispatch_error(opcode: u32, body: &[u8], errno: i32) {
     let mapping = FilesystemMapping::default();
     let fs = Probe::new(mapping);
+    let reply = dispatch(&fs, opcode, body, mapping).try_recv().unwrap();
+    assert_eq!(reply.len(), 16);
+    assert_eq!(i32::from_ne_bytes(reply[4..8].try_into().unwrap()), -errno);
+}
+
+#[test]
+fn dispatch_rejects_setxattr_with_mismatched_size() {
     let mut body = vec![0; size_of::<abi::fuse_setxattr_in>()];
     body[..size_of::<u32>()].copy_from_slice(&2u32.to_ne_bytes());
     body.extend_from_slice(b"user.test\0a");
@@ -448,20 +454,7 @@ fn dispatch_rejects_setxattr_with_mismatched_size() {
         Err(RequestError::InvalidArguments)
     ));
 
-    let reply = dispatch(&fs, opcode, &body, mapping).try_recv().unwrap();
-    assert_eq!(reply.len(), 16);
-    assert_eq!(
-        i32::from_ne_bytes(reply[4..8].try_into().unwrap()),
-        -libc::ENOSYS
-    );
-}
-
-fn assert_dispatch_error(opcode: u32, body: &[u8], errno: i32) {
-    let mapping = FilesystemMapping::default();
-    let fs = Probe::new(mapping);
-    let reply = dispatch(&fs, opcode, body, mapping).try_recv().unwrap();
-    assert_eq!(reply.len(), 16);
-    assert_eq!(i32::from_ne_bytes(reply[4..8].try_into().unwrap()), -errno);
+    assert_dispatch_error(opcode, &body, libc::ENOSYS);
 }
 
 #[test]
