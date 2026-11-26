@@ -38,6 +38,8 @@ pub(crate) enum RequestError {
     InvalidLength(usize),
     /// Invalid operation arguments.
     InvalidArguments,
+    /// FLUSH request without a lock owner (FUSE ABI before 7.7).
+    LegacyFlush,
 }
 
 /// Unique ID for a request from the kernel
@@ -221,6 +223,7 @@ impl fmt::Display for RequestError {
             }
             RequestError::InvalidLength(len) => write!(f, "Invalid FUSE request length ({len})"),
             RequestError::InvalidArguments => write!(f, "Invalid FUSE operation arguments"),
+            RequestError::LegacyFlush => write!(f, "Unsupported legacy FUSE FLUSH layout"),
         }
     }
 }
@@ -279,6 +282,8 @@ mod op {
     use crate::ll::request::abi::*;
     use crate::ll::request::validate_off_t;
     use crate::time::system_time_from_time;
+    #[cfg(target_os = "macos")]
+    use crate::time::system_time_from_unsigned_time;
 
     /// Look up a directory entry by name and get its attributes.
     ///
@@ -350,8 +355,70 @@ mod op {
         #[expect(dead_code)]
         header: &'a fuse_in_header,
         arg: &'a fuse_setattr_in,
+        pub(crate) atime: Option<TimeOrNow>,
+        pub(crate) mtime: Option<TimeOrNow>,
+        pub(crate) ctime: Option<SystemTime>,
+        pub(crate) crtime: Option<SystemTime>,
+        pub(crate) chgtime: Option<SystemTime>,
+        pub(crate) bkuptime: Option<SystemTime>,
     }
-    impl SetAttr<'_> {
+    impl<'a> SetAttr<'a> {
+        fn new(header: &'a fuse_in_header, arg: &'a fuse_setattr_in) -> Option<Self> {
+            let valid = FattrFlags::from_bits_retain(arg.valid);
+            let atime = Self::selected_time(valid.contains(FattrFlags::FATTR_ATIME), || {
+                if arg.atime_now() {
+                    Some(TimeOrNow::Now)
+                } else {
+                    system_time_from_time(arg.atime, arg.atimensec).map(TimeOrNow::SpecificTime)
+                }
+            })?;
+            let mtime = Self::selected_time(valid.contains(FattrFlags::FATTR_MTIME), || {
+                if arg.mtime_now() {
+                    Some(TimeOrNow::Now)
+                } else {
+                    system_time_from_time(arg.mtime, arg.mtimensec).map(TimeOrNow::SpecificTime)
+                }
+            })?;
+            let ctime = Self::selected_time(valid.contains(FattrFlags::FATTR_CTIME), || {
+                system_time_from_time(arg.ctime, arg.ctimensec)
+            })?;
+            #[cfg(target_os = "macos")]
+            let (crtime, chgtime, bkuptime) = (
+                // macFUSE may send its 1904 epoch as a sentinel for no creation time.
+                Self::selected_time(
+                    valid.contains(FattrFlags::FATTR_CRTIME) && arg.crtime != 0xffffffff83da4f80,
+                    || system_time_from_unsigned_time(arg.crtime, arg.crtimensec),
+                )?,
+                Self::selected_time(valid.contains(FattrFlags::FATTR_CHGTIME), || {
+                    system_time_from_unsigned_time(arg.chgtime, arg.chgtimensec)
+                })?,
+                Self::selected_time(valid.contains(FattrFlags::FATTR_BKUPTIME), || {
+                    system_time_from_unsigned_time(arg.bkuptime, arg.bkuptimensec)
+                })?,
+            );
+            #[cfg(not(target_os = "macos"))]
+            let (crtime, chgtime, bkuptime) = (None, None, None);
+
+            Some(Self {
+                header,
+                arg,
+                atime,
+                mtime,
+                ctime,
+                crtime,
+                chgtime,
+                bkuptime,
+            })
+        }
+
+        fn selected_time<T>(valid: bool, convert: impl FnOnce() -> Option<T>) -> Option<Option<T>> {
+            if valid {
+                Some(Some(convert()?))
+            } else {
+                Some(None)
+            }
+        }
+
         fn valid(&self) -> FattrFlags {
             FattrFlags::from_bits_retain(self.arg.valid)
         }
@@ -383,41 +450,6 @@ mod op {
                 None
             }
         }
-        pub(crate) fn atime(&self) -> Option<TimeOrNow> {
-            if self.valid().contains(FattrFlags::FATTR_ATIME) {
-                Some(if self.arg.atime_now() {
-                    TimeOrNow::Now
-                } else {
-                    TimeOrNow::SpecificTime(system_time_from_time(
-                        self.arg.atime,
-                        self.arg.atimensec,
-                    ))
-                })
-            } else {
-                None
-            }
-        }
-        pub(crate) fn mtime(&self) -> Option<TimeOrNow> {
-            if self.valid().contains(FattrFlags::FATTR_MTIME) {
-                Some(if self.arg.mtime_now() {
-                    TimeOrNow::Now
-                } else {
-                    TimeOrNow::SpecificTime(system_time_from_time(
-                        self.arg.mtime,
-                        self.arg.mtimensec,
-                    ))
-                })
-            } else {
-                None
-            }
-        }
-        pub(crate) fn ctime(&self) -> Option<SystemTime> {
-            if self.valid().contains(FattrFlags::FATTR_CTIME) {
-                Some(system_time_from_time(self.arg.ctime, self.arg.ctimensec))
-            } else {
-                None
-            }
-        }
         /// The value set by the [`Open`] method. See [`FileHandle`].
         ///
         /// This will only be set if the user passed a file-descriptor to set the
@@ -428,52 +460,6 @@ mod op {
             } else {
                 None
             }
-        }
-        pub(crate) fn crtime(&self) -> Option<SystemTime> {
-            #[cfg(target_os = "macos")]
-            if self.valid().contains(FattrFlags::FATTR_CRTIME) {
-                // During certain operation, macOS use some helper that send request to the mountpoint with `crtime` set to 0xffffffff83da4f80.
-                // That value correspond to `-2_082_844_800u64` which is the difference between the date 1904-01-01 and 1970-01-01 because macOS epoch start at 1904 and not 1970.
-                // https://github.com/macfuse/macfuse/issues/1042
-                if self.arg.crtime == 0xffffffff83da4f80 {
-                    None
-                } else {
-                    Some(
-                        SystemTime::UNIX_EPOCH
-                            + std::time::Duration::new(self.arg.crtime, self.arg.crtimensec),
-                    )
-                }
-            } else {
-                None
-            }
-            #[cfg(not(target_os = "macos"))]
-            None
-        }
-        pub(crate) fn chgtime(&self) -> Option<SystemTime> {
-            #[cfg(target_os = "macos")]
-            if self.valid().contains(FattrFlags::FATTR_CHGTIME) {
-                Some(
-                    SystemTime::UNIX_EPOCH
-                        + std::time::Duration::new(self.arg.chgtime, self.arg.chgtimensec),
-                )
-            } else {
-                None
-            }
-            #[cfg(not(target_os = "macos"))]
-            None
-        }
-        pub(crate) fn bkuptime(&self) -> Option<SystemTime> {
-            #[cfg(target_os = "macos")]
-            if self.valid().contains(FattrFlags::FATTR_BKUPTIME) {
-                Some(
-                    SystemTime::UNIX_EPOCH
-                        + std::time::Duration::new(self.arg.bkuptime, self.arg.bkuptimensec),
-                )
-            } else {
-                None
-            }
-            #[cfg(not(target_os = "macos"))]
-            None
         }
         pub(crate) fn flags(&self) -> Option<BsdFileFlags> {
             #[cfg(target_os = "macos")]
@@ -499,13 +485,13 @@ mod op {
                 self.uid(),
                 self.gid(),
                 self.size(),
-                self.atime(),
-                self.mtime(),
-                self.ctime(),
+                self.atime,
+                self.mtime,
+                self.ctime,
                 self.file_handle(),
-                self.crtime(),
-                self.chgtime(),
-                self.bkuptime(),
+                self.crtime,
+                self.chgtime,
+                self.bkuptime,
                 self.flags()
             )
         }
@@ -1670,10 +1656,7 @@ mod op {
 
                 arg: data.fetch()?,
             }),
-            fuse_opcode::FUSE_SETATTR => Operation::SetAttr(SetAttr {
-                header,
-                arg: data.fetch()?,
-            }),
+            fuse_opcode::FUSE_SETATTR => Operation::SetAttr(SetAttr::new(header, data.fetch()?)?),
             fuse_opcode::FUSE_READLINK => Operation::ReadLink(ReadLink { header }),
             fuse_opcode::FUSE_SYMLINK => Operation::SymLink(SymLink {
                 header,
@@ -2197,6 +2180,11 @@ impl<'a> AnyRequest<'a> {
         let opcode = fuse_opcode::try_from(self.header.opcode).map_err(
             |e: num_enum::TryFromPrimitiveError<_>| RequestError::UnknownOperation(e.number),
         )?;
+        if matches!(opcode, fuse_opcode::FUSE_FLUSH)
+            && self.data.len() == std::mem::offset_of!(abi::fuse_flush_in, lock_owner)
+        {
+            return Err(RequestError::LegacyFlush);
+        }
         // Parse/check operation arguments
         op::parse(self.header, &opcode, self.data).ok_or(RequestError::InvalidArguments)
     }

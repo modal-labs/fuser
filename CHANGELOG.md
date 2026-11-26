@@ -2,6 +2,8 @@
 
 ## Unreleased
 * Return `EINVAL` for malformed operation arguments instead of panicking on invalid payload sizes.
+* Preserve the `ENOSYS` fallback for legacy FUSE `FLUSH` requests.
+* Reject invalid `SETATTR` timestamps before formatting or dispatching requests.
 * Add `ReplyEntry::entry_with_nodeid()`, `ReplyCreate::created_with_nodeid()` and
   `ReplyCreate::created_passthrough_with_nodeid()` to reply with a nodeid other than `attr.ino`
 * `ReplyDirectoryPlus::add()` now sends its `ino` argument as the entry's nodeid instead of

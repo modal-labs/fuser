@@ -486,3 +486,31 @@ fn dispatch_rejects_ioctl_with_short_input() {
 fn dispatch_rejects_unknown_opcode() {
     assert_dispatch_error(u32::MAX, &[], libc::ENOSYS);
 }
+
+#[test]
+fn dispatch_preserves_fuse_7_6_flush_fallback() {
+    assert_dispatch_error(abi::fuse_opcode::FUSE_FLUSH as u32, &[0; 16], libc::ENOSYS);
+}
+
+#[test]
+fn dispatch_and_logging_reject_invalid_setattr_timestamp() {
+    let mut body = vec![0; size_of::<abi::fuse_setattr_in>()];
+    let valid = offset_of!(abi::fuse_setattr_in, valid);
+    let mtime = offset_of!(abi::fuse_setattr_in, mtime);
+    let mtimensec = offset_of!(abi::fuse_setattr_in, mtimensec);
+    let flags = crate::ll::flags::fattr_flags::FattrFlags::FATTR_MTIME.bits();
+    body[valid..valid + 4].copy_from_slice(&flags.to_ne_bytes());
+    body[mtime..mtime + 8].copy_from_slice(&i64::MAX.to_ne_bytes());
+    body[mtimensec..mtimensec + 4].copy_from_slice(&1_000_000_000u32.to_ne_bytes());
+
+    let opcode = abi::fuse_opcode::FUSE_SETATTR as u32;
+    let packet = packet(opcode, &body);
+    let (sender, _rx) = sender();
+    let request = RequestWithSender::new(sender, packet.as_slice().as_bytes()).unwrap();
+    assert!(format!("{request:?}").contains("RequestWithSender"));
+    assert_eq!(
+        request.request.to_string(),
+        "FUSE(123) ino 0x0000000000000001"
+    );
+    assert_dispatch_error(opcode, &body, libc::EINVAL);
+}

@@ -113,7 +113,7 @@ impl<'a> RequestWithSender<'a> {
         se: &DispatchContext<'_, FS>,
     ) -> Result<Option<ResponseData>, Errno> {
         let op = self.request.operation().map_err(|err| match err {
-            RequestError::UnknownOperation(_) => Errno::ENOSYS,
+            RequestError::UnknownOperation(_) | RequestError::LegacyFlush => Errno::ENOSYS,
             _ => Errno::EINVAL,
         })?;
         // Implement allow_root & access check for auto_unmount
@@ -191,13 +191,13 @@ impl<'a> RequestWithSender<'a> {
                     x.uid().map(|id| self.mapping.uid.to_filesystem(id)),
                     x.gid().map(|id| self.mapping.gid.to_filesystem(id)),
                     x.size(),
-                    x.atime(),
-                    x.mtime(),
-                    x.ctime(),
+                    x.atime,
+                    x.mtime,
+                    x.ctime,
                     x.file_handle(),
-                    x.crtime(),
-                    x.chgtime(),
-                    x.bkuptime(),
+                    x.crtime,
+                    x.chgtime,
+                    x.bkuptime,
                     x.flags(),
                     self.reply(),
                 );
