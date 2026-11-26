@@ -1,6 +1,7 @@
 # FUSE for Rust - Changelog
 
 ## Unreleased
+* Reject invalid `SETATTR` timestamps without panicking.
 * Add `ReplyEntry::entry_with_nodeid()`, `ReplyCreate::created_with_nodeid()` and
   `ReplyCreate::created_passthrough_with_nodeid()` to reply with a nodeid other than `attr.ino`
 * `ReplyDirectoryPlus::add()` now sends its `ino` argument as the entry's nodeid instead of

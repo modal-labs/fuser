@@ -431,3 +431,32 @@ fn dispatch_acknowledges_destroy() {
     assert_eq!(reply.len(), 16);
     assert_eq!(i32::from_ne_bytes(reply[4..8].try_into().unwrap()), 0);
 }
+
+#[test]
+fn rejects_setattr_with_out_of_range_nanoseconds() {
+    let mut body = vec![0; size_of::<abi::fuse_setattr_in>()];
+    let valid = offset_of!(abi::fuse_setattr_in, valid);
+    let mtimensec = offset_of!(abi::fuse_setattr_in, mtimensec);
+    let flags = crate::ll::flags::fattr_flags::FattrFlags::FATTR_MTIME.bits();
+    body[valid..valid + 4].copy_from_slice(&flags.to_ne_bytes());
+    body[mtimensec..mtimensec + 4].copy_from_slice(&1_000_000_000u32.to_ne_bytes());
+
+    let opcode = abi::fuse_opcode::FUSE_SETATTR as u32;
+    let packet = packet(opcode, &body);
+    let (sender, _rx) = sender();
+    let request = RequestWithSender::new(sender, packet.as_slice().as_bytes()).unwrap();
+    assert!(format!("{request:?}").contains("RequestWithSender"));
+    assert_eq!(
+        request.request.to_string(),
+        "FUSE(123) ino 0x0000000000000001"
+    );
+
+    let mapping = FilesystemMapping::default();
+    let fs = Probe::new(mapping);
+    let reply = dispatch(&fs, opcode, &body, mapping).try_recv().unwrap();
+    assert_eq!(reply.len(), 16);
+    assert_eq!(
+        i32::from_ne_bytes(reply[4..8].try_into().unwrap()),
+        -libc::ENOSYS
+    );
+}
