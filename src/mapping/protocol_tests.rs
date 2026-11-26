@@ -451,10 +451,10 @@ fn dispatch_rejects_setxattr_with_mismatched_size() {
     let request = crate::ll::AnyRequest::try_from(packet.as_slice().as_bytes()).unwrap();
     assert!(matches!(
         request.operation(),
-        Err(RequestError::InvalidArguments)
+        Err(RequestError::PayloadSizeMismatch)
     ));
 
-    assert_dispatch_error(opcode, &body, libc::ENOSYS);
+    assert_dispatch_error(opcode, &body, libc::EINVAL);
 }
 
 #[test]
@@ -463,7 +463,7 @@ fn dispatch_rejects_write_with_mismatched_size() {
     let size = offset_of!(abi::fuse_write_in, size);
     body[size..size + 4].copy_from_slice(&2u32.to_ne_bytes());
     body.push(b'a');
-    assert_dispatch_error(abi::fuse_opcode::FUSE_WRITE as u32, &body, libc::ENOSYS);
+    assert_dispatch_error(abi::fuse_opcode::FUSE_WRITE as u32, &body, libc::EINVAL);
 }
 
 #[test]
@@ -472,7 +472,7 @@ fn dispatch_rejects_ioctl_with_short_input() {
     let in_size = offset_of!(abi::fuse_ioctl_in, in_size);
     body[in_size..in_size + 4].copy_from_slice(&2u32.to_ne_bytes());
     body.push(b'a');
-    assert_dispatch_error(abi::fuse_opcode::FUSE_IOCTL as u32, &body, libc::ENOSYS);
+    assert_dispatch_error(abi::fuse_opcode::FUSE_IOCTL as u32, &body, libc::EINVAL);
 }
 
 #[test]

@@ -38,6 +38,8 @@ pub(crate) enum RequestError {
     InvalidLength(usize),
     /// Invalid operation arguments.
     InvalidArguments,
+    /// Declared payload size does not match the available data.
+    PayloadSizeMismatch,
 }
 
 /// Unique ID for a request from the kernel
@@ -221,6 +223,7 @@ impl fmt::Display for RequestError {
             }
             RequestError::InvalidLength(len) => write!(f, "Invalid FUSE request length ({len})"),
             RequestError::InvalidArguments => write!(f, "Invalid FUSE operation arguments"),
+            RequestError::PayloadSizeMismatch => write!(f, "Invalid FUSE payload size"),
         }
     }
 }
@@ -275,6 +278,7 @@ mod op {
     use crate::ll::request::Lock;
     use crate::ll::request::LockOwner;
     use crate::ll::request::Operation;
+    use crate::ll::request::RequestError;
     use crate::ll::request::RequestId;
     use crate::ll::request::abi::*;
     use crate::ll::request::validate_off_t;
@@ -1654,9 +1658,9 @@ mod op {
         header: &'a fuse_in_header,
         opcode: &fuse_opcode,
         data: &'a [u8],
-    ) -> Option<Operation<'a>> {
+    ) -> Option<Result<Operation<'a>, RequestError>> {
         let mut data = ArgumentIterator::new(data);
-        Some(match opcode {
+        Some(Ok(match opcode {
             fuse_opcode::FUSE_LOOKUP => Operation::Lookup(Lookup {
                 header,
                 name: data.fetch_str()?,
@@ -1724,7 +1728,7 @@ mod op {
                     data: data.fetch_all(),
                 };
                 if out.data().len() != out.arg.size as usize {
-                    return None;
+                    return Some(Err(RequestError::PayloadSizeMismatch));
                 }
                 out
             }),
@@ -1745,7 +1749,7 @@ mod op {
                     value: data.fetch_all(),
                 };
                 if out.value.len() != out.arg.size as usize {
-                    return None;
+                    return Some(Err(RequestError::PayloadSizeMismatch));
                 }
                 out
             }),
@@ -1833,11 +1837,10 @@ mod op {
             fuse_opcode::FUSE_DESTROY => Operation::Destroy(Destroy { header }),
             fuse_opcode::FUSE_IOCTL => {
                 let arg: &fuse_ioctl_in = data.fetch()?;
-                Operation::IoCtl(IoCtl {
-                    header,
-                    arg,
-                    data: data.fetch_all().get(..arg.in_size as usize)?,
-                })
+                let Some(data) = data.fetch_all().get(..arg.in_size as usize) else {
+                    return Some(Err(RequestError::PayloadSizeMismatch));
+                };
+                Operation::IoCtl(IoCtl { header, arg, data })
             }
             fuse_opcode::FUSE_POLL => Operation::Poll(Poll {
                 header,
@@ -1902,7 +1905,7 @@ mod op {
                 header,
                 arg: data.fetch()?,
             }),
-        })
+        }))
     }
 }
 use op::*;
@@ -2198,7 +2201,7 @@ impl<'a> AnyRequest<'a> {
             |e: num_enum::TryFromPrimitiveError<_>| RequestError::UnknownOperation(e.number),
         )?;
         // Parse/check operation arguments
-        op::parse(self.header, &opcode, self.data).ok_or(RequestError::InvalidArguments)
+        op::parse(self.header, &opcode, self.data).unwrap_or(Err(RequestError::InvalidArguments))
     }
 
     pub(crate) fn header(&self) -> &fuse_in_header {

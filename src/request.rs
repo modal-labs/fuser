@@ -22,6 +22,7 @@ use crate::ll::Errno;
 use crate::ll::ResponseData;
 use crate::ll::ResponseErrno;
 use crate::ll::fuse_abi::fuse_opcode;
+use crate::ll::request::RequestError;
 use crate::reply::Reply;
 use crate::reply::ReplyDirectory;
 use crate::reply::ReplyDirectoryPlus;
@@ -111,7 +112,10 @@ impl<'a> RequestWithSender<'a> {
         &self,
         se: &DispatchContext<'_, FS>,
     ) -> Result<Option<ResponseData>, Errno> {
-        let op = self.request.operation().map_err(|_| Errno::ENOSYS)?;
+        let op = self.request.operation().map_err(|error| match error {
+            RequestError::PayloadSizeMismatch => Errno::EINVAL,
+            _ => Errno::ENOSYS,
+        })?;
         // Implement allow_root & access check for auto_unmount
         if (se.allowed == SessionACL::RootAndOwner
             && self.request.uid() != se.session_owner
