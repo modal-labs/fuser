@@ -431,3 +431,56 @@ fn dispatch_acknowledges_destroy() {
     assert_eq!(reply.len(), 16);
     assert_eq!(i32::from_ne_bytes(reply[4..8].try_into().unwrap()), 0);
 }
+
+fn assert_dispatch_error(opcode: u32, body: &[u8], errno: i32) {
+    let mapping = FilesystemMapping::default();
+    let fs = Probe::new(mapping);
+    let reply = dispatch(&fs, opcode, body, mapping).try_recv().unwrap();
+    assert_eq!(reply.len(), 16);
+    assert_eq!(i32::from_ne_bytes(reply[4..8].try_into().unwrap()), -errno);
+}
+
+#[test]
+fn dispatch_rejects_setxattr_with_mismatched_size() {
+    let mut body = vec![0; size_of::<abi::fuse_setxattr_in>()];
+    body[..size_of::<u32>()].copy_from_slice(&2u32.to_ne_bytes());
+    body.extend_from_slice(b"user.test\0a");
+    let opcode = abi::fuse_opcode::FUSE_SETXATTR as u32;
+    assert_dispatch_error(opcode, &body, libc::EINVAL);
+}
+
+#[test]
+fn rejects_header_shorter_than_fuse_in_header() {
+    let mut packet = packet(abi::fuse_opcode::FUSE_GETATTR as u32, &[]);
+    packet.as_mut_slice().as_mut_bytes()[..4].copy_from_slice(&39u32.to_ne_bytes());
+    let (sender, _rx) = sender();
+    assert!(RequestWithSender::new(sender, packet.as_slice().as_bytes()).is_none());
+}
+
+#[test]
+fn dispatch_rejects_write_with_mismatched_size() {
+    let mut body = vec![0; size_of::<abi::fuse_write_in>()];
+    let size = offset_of!(abi::fuse_write_in, size);
+    body[size..size + 4].copy_from_slice(&2u32.to_ne_bytes());
+    body.push(b'a');
+    assert_dispatch_error(abi::fuse_opcode::FUSE_WRITE as u32, &body, libc::EINVAL);
+}
+
+#[test]
+fn dispatch_rejects_ioctl_with_short_input() {
+    let mut body = vec![0; size_of::<abi::fuse_ioctl_in>()];
+    let in_size = offset_of!(abi::fuse_ioctl_in, in_size);
+    body[in_size..in_size + 4].copy_from_slice(&2u32.to_ne_bytes());
+    body.push(b'a');
+    assert_dispatch_error(abi::fuse_opcode::FUSE_IOCTL as u32, &body, libc::EINVAL);
+}
+
+#[test]
+fn dispatch_rejects_unknown_opcode() {
+    assert_dispatch_error(u32::MAX, &[], libc::ENOSYS);
+}
+
+#[test]
+fn dispatch_preserves_fuse_7_6_flush_fallback() {
+    assert_dispatch_error(abi::fuse_opcode::FUSE_FLUSH as u32, &[0; 16], libc::ENOSYS);
+}

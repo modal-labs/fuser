@@ -34,8 +34,12 @@ pub(crate) enum RequestError {
     UnknownOperation(u32),
     /// Not enough data for arguments (short read).
     ShortRead(usize, usize),
-    /// Insufficient argument data.
-    InsufficientData,
+    /// Declared request length is smaller than the header.
+    InvalidLength(usize),
+    /// Invalid operation arguments.
+    InvalidArguments,
+    /// Declared payload size does not match the available data.
+    PayloadSizeMismatch,
 }
 
 /// Unique ID for a request from the kernel
@@ -217,7 +221,9 @@ impl fmt::Display for RequestError {
             RequestError::ShortRead(len, total) => {
                 write!(f, "Short read of FUSE request ({len} < {total})")
             }
-            RequestError::InsufficientData => write!(f, "Insufficient argument data"),
+            RequestError::InvalidLength(len) => write!(f, "Invalid FUSE request length ({len})"),
+            RequestError::InvalidArguments => write!(f, "Invalid FUSE operation arguments"),
+            RequestError::PayloadSizeMismatch => write!(f, "Invalid FUSE payload size"),
         }
     }
 }
@@ -272,6 +278,7 @@ mod op {
     use crate::ll::request::Lock;
     use crate::ll::request::LockOwner;
     use crate::ll::request::Operation;
+    use crate::ll::request::RequestError;
     use crate::ll::request::RequestId;
     use crate::ll::request::abi::*;
     use crate::ll::request::validate_off_t;
@@ -1340,7 +1347,7 @@ mod op {
     }
     impl IoCtl<'_> {
         pub(crate) fn in_data(&self) -> &[u8] {
-            &self.data[..self.arg.in_size as usize]
+            self.data
         }
         pub(crate) fn unrestricted(&self) -> bool {
             self.flags().contains(IoctlFlags::FUSE_IOCTL_UNRESTRICTED)
@@ -1651,9 +1658,9 @@ mod op {
         header: &'a fuse_in_header,
         opcode: &fuse_opcode,
         data: &'a [u8],
-    ) -> Option<Operation<'a>> {
+    ) -> Option<Result<Operation<'a>, RequestError>> {
         let mut data = ArgumentIterator::new(data);
-        Some(match opcode {
+        Some(Ok(match opcode {
             fuse_opcode::FUSE_LOOKUP => Operation::Lookup(Lookup {
                 header,
                 name: data.fetch_str()?,
@@ -1720,7 +1727,9 @@ mod op {
                     arg: data.fetch()?,
                     data: data.fetch_all(),
                 };
-                assert!(out.data().len() == out.arg.size as usize);
+                if out.data().len() != out.arg.size as usize {
+                    return Some(Err(RequestError::PayloadSizeMismatch));
+                }
                 out
             }),
             fuse_opcode::FUSE_STATFS => Operation::StatFs(StatFs { header }),
@@ -1739,7 +1748,9 @@ mod op {
                     name: data.fetch_str()?,
                     value: data.fetch_all(),
                 };
-                assert!(out.value.len() == out.arg.size as usize);
+                if out.value.len() != out.arg.size as usize {
+                    return Some(Err(RequestError::PayloadSizeMismatch));
+                }
                 out
             }),
             fuse_opcode::FUSE_GETXATTR => Operation::GetXAttr(GetXAttr {
@@ -1824,11 +1835,13 @@ mod op {
                 arg: data.fetch()?,
             }),
             fuse_opcode::FUSE_DESTROY => Operation::Destroy(Destroy { header }),
-            fuse_opcode::FUSE_IOCTL => Operation::IoCtl(IoCtl {
-                header,
-                arg: data.fetch()?,
-                data: data.fetch_all(),
-            }),
+            fuse_opcode::FUSE_IOCTL => {
+                let arg: &fuse_ioctl_in = data.fetch()?;
+                let Some(data) = data.fetch_all().get(..arg.in_size as usize) else {
+                    return Some(Err(RequestError::PayloadSizeMismatch));
+                };
+                Operation::IoCtl(IoCtl { header, arg, data })
+            }
             fuse_opcode::FUSE_POLL => Operation::Poll(Poll {
                 header,
                 arg: data.fetch()?,
@@ -1892,7 +1905,7 @@ mod op {
                 header,
                 arg: data.fetch()?,
             }),
-        })
+        }))
     }
 }
 use op::*;
@@ -2188,7 +2201,7 @@ impl<'a> AnyRequest<'a> {
             |e: num_enum::TryFromPrimitiveError<_>| RequestError::UnknownOperation(e.number),
         )?;
         // Parse/check operation arguments
-        op::parse(self.header, &opcode, self.data).ok_or(RequestError::InsufficientData)
+        op::parse(self.header, &opcode, self.data).unwrap_or(Err(RequestError::InvalidArguments))
     }
 
     pub(crate) fn header(&self) -> &fuse_in_header {
@@ -2227,13 +2240,14 @@ impl<'a> TryFrom<&'a [u8]> for AnyRequest<'a> {
             .fetch()
             .ok_or_else(|| RequestError::ShortReadHeader(arg_iter.len()))?;
         // Check data size
-        if data_len < header.len as usize {
-            return Err(RequestError::ShortRead(data_len, header.len as usize));
+        let request_len = header.len as usize;
+        if data_len < request_len {
+            return Err(RequestError::ShortRead(data_len, request_len));
         }
-        Ok(Self {
-            header,
-            data: &data[size_of::<fuse_in_header>()..header.len as usize],
-        })
+        let data = data
+            .get(size_of::<fuse_in_header>()..request_len)
+            .ok_or(RequestError::InvalidLength(request_len))?;
+        Ok(Self { header, data })
     }
 }
 
