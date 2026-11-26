@@ -203,6 +203,7 @@ impl ResponseStruct<abi::fuse_statfs_out> {
 
 impl ResponseStruct<abi::fuse_create_out> {
     pub(crate) fn new_create(
+        ino: INodeNo,
         ttl: &Duration,
         attr: &Attr,
         generation: Generation,
@@ -212,7 +213,7 @@ impl ResponseStruct<abi::fuse_create_out> {
     ) -> Self {
         ResponseStruct(abi::fuse_create_out(
             abi::fuse_entry_out {
-                nodeid: attr.attr.ino,
+                nodeid: ino.into(),
                 generation: generation.into(),
                 entry_valid: ttl.as_secs(),
                 attr_valid: ttl.as_secs(),
@@ -474,7 +475,7 @@ impl DirEntList {
 
 #[derive(Debug)]
 pub(crate) struct DirEntryPlus<T: AsRef<Path>> {
-    #[allow(unused)] // We use `attr.ino` instead
+    /// The entry's nodeid, which may differ from `attr.ino`.
     ino: INodeNo,
     generation: Generation,
     offset: DirEntOffset,
@@ -528,7 +529,7 @@ impl DirEntPlusList {
         let name = x.name.as_ref().as_os_str().as_bytes();
         let header = abi::fuse_direntplus {
             entry_out: abi::fuse_entry_out {
-                nodeid: x.attr.attr.ino,
+                nodeid: x.ino.into(),
                 generation: x.generation.into(),
                 entry_valid: x.entry_valid.as_secs(),
                 attr_valid: x.attr_valid.as_secs(),
@@ -829,6 +830,7 @@ mod test {
             blksize: 0xdd,
         };
         let r = ResponseStruct::new_create(
+            INodeNo(0x11),
             &ttl,
             &attr.into(),
             Generation(0xaa),
@@ -927,5 +929,90 @@ mod test {
             r.with_iovec(RequestId(0xdeadbeef), ioslice_to_vec),
             expected
         );
+    }
+
+    fn test_attr(ino: u64) -> crate::FileAttr {
+        let time = UNIX_EPOCH + Duration::new(0x1234, 0x5678);
+        crate::FileAttr {
+            ino: INodeNo(ino),
+            size: 0x22,
+            blocks: 0x33,
+            atime: time,
+            mtime: time,
+            ctime: time,
+            crtime: time,
+            kind: FileType::RegularFile,
+            perm: 0o644,
+            nlink: 0x55,
+            uid: 0x66,
+            gid: 0x77,
+            rdev: 0x88,
+            flags: 0x99,
+            blksize: 0xdd,
+        }
+    }
+
+    fn u64_at(bytes: &[u8], offset: usize) -> u64 {
+        u64::from_ne_bytes(bytes[offset..offset + 8].try_into().unwrap())
+    }
+
+    const OUT_HEADER_LEN: usize = size_of::<abi::fuse_out_header>();
+    const ENTRY_OUT_LEN: usize = size_of::<abi::fuse_entry_out>();
+    const ENTRY_ATTR_INO_OFFSET: usize = ENTRY_OUT_LEN - size_of::<abi::fuse_attr>();
+
+    #[test]
+    fn reply_entry_nodeid_distinct_from_attr_ino() {
+        let ttl = Duration::new(0x8765, 0x4321);
+        let r = ResponseStruct::new_entry(
+            INodeNo(0x11),
+            Generation(0xaa),
+            &test_attr(0x42).into(),
+            ttl,
+            ttl,
+        );
+        let bytes = r.with_iovec(RequestId(0xdeadbeef), ioslice_to_vec);
+        let entry = &bytes[OUT_HEADER_LEN..];
+        assert_eq!(u64_at(entry, 0), 0x11);
+        assert_eq!(u64_at(entry, ENTRY_ATTR_INO_OFFSET), 0x42);
+    }
+
+    #[test]
+    fn reply_create_nodeid_distinct_from_attr_ino() {
+        let ttl = Duration::new(0x8765, 0x4321);
+        let r = ResponseStruct::new_create(
+            INodeNo(0x11),
+            &ttl,
+            &test_attr(0x42).into(),
+            Generation(0xaa),
+            FileHandle(0xbb),
+            FopenFlags::from_bits_retain(0xcc),
+            0,
+        );
+        let bytes = r.with_iovec(RequestId(0xdeadbeef), ioslice_to_vec);
+        let entry = &bytes[OUT_HEADER_LEN..];
+        assert_eq!(u64_at(entry, 0), 0x11);
+        assert_eq!(u64_at(entry, ENTRY_ATTR_INO_OFFSET), 0x42);
+    }
+
+    #[test]
+    fn reply_directory_plus_nodeid_distinct_from_attr_ino() {
+        let ttl = Duration::new(0x8765, 0x4321);
+        let mut buf = DirEntPlusList::new(4096);
+        assert!(!buf.push(&DirEntryPlus::new(
+            INodeNo(0x11),
+            Generation(0xaa),
+            DirEntOffset(1),
+            "hello",
+            ttl,
+            test_attr(0x42).into(),
+            ttl,
+        )));
+        let r: ResponseData = buf.into();
+        let bytes = r.with_iovec(RequestId(0xdeadbeef), ioslice_to_vec);
+        let entry = &bytes[OUT_HEADER_LEN..];
+        assert_eq!(u64_at(entry, 0), 0x11);
+        assert_eq!(u64_at(entry, ENTRY_ATTR_INO_OFFSET), 0x42);
+        let dirent_ino = u64_at(entry, ENTRY_OUT_LEN);
+        assert_eq!(dirent_ino, 0x42);
     }
 }

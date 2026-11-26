@@ -81,6 +81,14 @@ impl<'a> RequestWithSender<'a> {
         self.request.header().opcode == fuse_opcode::FUSE_DESTROY as u32
     }
 
+    /// Whether this request begins a FUSE session.
+    ///
+    /// Transports route it to the handshake, which needs exclusive access to
+    /// the filesystem, instead of dispatching it.
+    pub fn is_init(&self) -> bool {
+        matches!(self.request.operation(), Ok(ll::Operation::Init(_)))
+    }
+
     /// Dispatch request to the given filesystem.
     /// This calls the appropriate filesystem operation method for the
     /// request and sends back the returned reply to the kernel
