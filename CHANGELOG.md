@@ -1,9 +1,9 @@
 # FUSE for Rust - Changelog
 
 ## Unreleased
-* Return `EINVAL` for malformed operation arguments instead of panicking on invalid payload sizes.
-* Preserve the `ENOSYS` fallback for legacy FUSE `FLUSH` requests.
+* Reject malformed operation arguments without panicking, preserving the `ENOSYS` fallback.
 * Reject invalid `SETATTR` timestamps before formatting or dispatching requests.
+* Do not negotiate `FUSE_SETXATTR_EXT` on Linux; the parser only supports the legacy layout.
 * Add `ReplyEntry::entry_with_nodeid()`, `ReplyCreate::created_with_nodeid()` and
   `ReplyCreate::created_passthrough_with_nodeid()` to reply with a nodeid other than `attr.ino`
 * `ReplyDirectoryPlus::add()` now sends its `ino` argument as the entry's nodeid instead of

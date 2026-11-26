@@ -38,8 +38,6 @@ pub(crate) enum RequestError {
     InvalidLength(usize),
     /// Invalid operation arguments.
     InvalidArguments,
-    /// FLUSH request without a lock owner (FUSE ABI before 7.7).
-    LegacyFlush,
 }
 
 /// Unique ID for a request from the kernel
@@ -223,7 +221,6 @@ impl fmt::Display for RequestError {
             }
             RequestError::InvalidLength(len) => write!(f, "Invalid FUSE request length ({len})"),
             RequestError::InvalidArguments => write!(f, "Invalid FUSE operation arguments"),
-            RequestError::LegacyFlush => write!(f, "Unsupported legacy FUSE FLUSH layout"),
         }
     }
 }
@@ -970,10 +967,11 @@ mod op {
     impl Init<'_> {
         pub(crate) fn capabilities(&self) -> InitFlags {
             let flags = InitFlags::from_bits_retain(u64::from(self.arg.flags));
+            // The parser only accepts legacy SETXATTR. macOS reuses the bit.
+            #[cfg(not(target_os = "macos"))]
+            let flags = flags - InitFlags::FUSE_SETXATTR_EXT;
             if flags.contains(InitFlags::FUSE_INIT_EXT) {
-                return InitFlags::from_bits_retain(
-                    u64::from(self.arg.flags) | (u64::from(self.arg.flags2) << 32),
-                );
+                return flags | InitFlags::from_bits_retain(u64::from(self.arg.flags2) << 32);
             }
             flags
         }
@@ -2180,11 +2178,6 @@ impl<'a> AnyRequest<'a> {
         let opcode = fuse_opcode::try_from(self.header.opcode).map_err(
             |e: num_enum::TryFromPrimitiveError<_>| RequestError::UnknownOperation(e.number),
         )?;
-        if matches!(opcode, fuse_opcode::FUSE_FLUSH)
-            && self.data.len() == std::mem::offset_of!(abi::fuse_flush_in, lock_owner)
-        {
-            return Err(RequestError::LegacyFlush);
-        }
         // Parse/check operation arguments
         op::parse(self.header, &opcode, self.data).ok_or(RequestError::InvalidArguments)
     }

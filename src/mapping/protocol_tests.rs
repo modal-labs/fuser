@@ -405,6 +405,45 @@ fn init_credentials_and_default_identity() {
     );
 }
 
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn init_does_not_negotiate_extended_setxattr() {
+    use crate::InitFlags;
+
+    struct ExtendedSetxattr;
+    impl Filesystem for ExtendedSetxattr {
+        fn init(&mut self, _request: &Request, config: &mut KernelConfig) -> io::Result<()> {
+            assert_eq!(
+                config.add_capabilities(InitFlags::FUSE_SETXATTR_EXT),
+                Err(InitFlags::FUSE_SETXATTR_EXT)
+            );
+            config.add_capabilities(InitFlags::FUSE_ASYNC_READ).unwrap();
+            Ok(())
+        }
+    }
+
+    let advertised =
+        InitFlags::FUSE_INIT_EXT | InitFlags::FUSE_SETXATTR_EXT | InitFlags::FUSE_ASYNC_READ;
+    let mut body = vec![0; size_of::<abi::fuse_init_in>()];
+    body[..4].copy_from_slice(&abi::FUSE_KERNEL_VERSION.to_ne_bytes());
+    body[4..8].copy_from_slice(&abi::FUSE_KERNEL_MINOR_VERSION.to_ne_bytes());
+    let flags_offset = offset_of!(abi::fuse_init_in, flags);
+    body[flags_offset..flags_offset + 4].copy_from_slice(&advertised.pair().0.to_ne_bytes());
+
+    let packet = packet(abi::fuse_opcode::FUSE_INIT as u32, &body);
+    let (sender, rx) = sender();
+    let result =
+        crate::handshake_request(&mut ExtendedSetxattr, sender, packet.as_slice().as_bytes());
+    assert!(matches!(result.unwrap(), HandshakeOutcome::Complete { .. }));
+    let reply = receive(rx);
+    let flags_offset = size_of::<abi::fuse_out_header>() + offset_of!(abi::fuse_init_out, flags);
+    let reply_flags = u32::from_ne_bytes(reply[flags_offset..flags_offset + 4].try_into().unwrap());
+    assert_eq!(
+        InitFlags::from_bits_retain(u64::from(reply_flags)) & advertised,
+        advertised - InitFlags::FUSE_SETXATTR_EXT,
+    );
+}
+
 #[test]
 fn session_boundaries_are_identified_before_dispatch() {
     // A `fuse_init_in` for protocol 7.31; the other requests carry no body.
@@ -452,7 +491,7 @@ fn dispatch_rejects_setxattr_with_mismatched_size() {
     assert_eq!(reply.len(), 16);
     assert_eq!(
         i32::from_ne_bytes(reply[4..8].try_into().unwrap()),
-        -libc::EINVAL
+        -libc::ENOSYS
     );
 }
 
@@ -470,7 +509,7 @@ fn dispatch_rejects_write_with_mismatched_size() {
     let size = offset_of!(abi::fuse_write_in, size);
     body[size..size + 4].copy_from_slice(&2u32.to_ne_bytes());
     body.push(b'a');
-    assert_dispatch_error(abi::fuse_opcode::FUSE_WRITE as u32, &body, libc::EINVAL);
+    assert_dispatch_error(abi::fuse_opcode::FUSE_WRITE as u32, &body, libc::ENOSYS);
 }
 
 #[test]
@@ -479,7 +518,7 @@ fn dispatch_rejects_ioctl_with_short_input() {
     let in_size = offset_of!(abi::fuse_ioctl_in, in_size);
     body[in_size..in_size + 4].copy_from_slice(&2u32.to_ne_bytes());
     body.push(b'a');
-    assert_dispatch_error(abi::fuse_opcode::FUSE_IOCTL as u32, &body, libc::EINVAL);
+    assert_dispatch_error(abi::fuse_opcode::FUSE_IOCTL as u32, &body, libc::ENOSYS);
 }
 
 #[test]
@@ -512,5 +551,5 @@ fn dispatch_and_logging_reject_invalid_setattr_timestamp() {
         request.request.to_string(),
         "FUSE(123) ino 0x0000000000000001"
     );
-    assert_dispatch_error(opcode, &body, libc::EINVAL);
+    assert_dispatch_error(opcode, &body, libc::ENOSYS);
 }
