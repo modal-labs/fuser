@@ -37,24 +37,14 @@ pub(crate) fn time_from_system_time(system_time: &SystemTime) -> (i64, u32) {
 /// Converts a tuple of (seconds, nanoseconds) since the Unix epoch to a `SystemTime`.
 ///
 /// This handles negative seconds (times before the Unix epoch).
-pub(crate) fn system_time_from_time(secs: i64, nsecs: u32) -> Option<SystemTime> {
-    if nsecs >= 1_000_000_000 {
-        return None;
-    }
+pub(crate) fn system_time_from_time(secs: i64, nsecs: u32) -> SystemTime {
     if secs >= 0 {
-        UNIX_EPOCH.checked_add(Duration::new(secs as u64, nsecs))
+        SystemTime::UNIX_EPOCH + Duration::new(secs as u64, nsecs)
     } else {
+        // TODO: overflow
         // TODO: 1_000_000_000 - nsec
-        UNIX_EPOCH.checked_sub(Duration::new(secs.unsigned_abs(), nsecs))
+        SystemTime::UNIX_EPOCH - Duration::new((-secs) as u64, nsecs)
     }
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) fn system_time_from_unsigned_time(secs: u64, nsecs: u32) -> Option<SystemTime> {
-    if nsecs >= 1_000_000_000 {
-        return None;
-    }
-    UNIX_EPOCH.checked_add(Duration::new(secs, nsecs))
 }
 
 #[cfg(test)]
