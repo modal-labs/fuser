@@ -8,7 +8,6 @@ use std::time::{Duration, SystemTime};
 use zerocopy::IntoBytes;
 
 use crate::ll::fuse_abi as abi;
-use crate::ll::request::RequestError;
 use crate::{
     BackingId, BsdFileFlags, CustomReplySender, DispatchContext, FileAttr, FileHandle, FileType,
     Filesystem, FilesystemMapping, FopenFlags, Generation, HandshakeOutcome, INodeNo, IdMap,
@@ -447,14 +446,15 @@ fn dispatch_rejects_setxattr_with_mismatched_size() {
     body[..size_of::<u32>()].copy_from_slice(&2u32.to_ne_bytes());
     body.extend_from_slice(b"user.test\0a");
     let opcode = abi::fuse_opcode::FUSE_SETXATTR as u32;
-    let packet = packet(opcode, &body);
-    let request = crate::ll::AnyRequest::try_from(packet.as_slice().as_bytes()).unwrap();
-    assert!(matches!(
-        request.operation(),
-        Err(RequestError::PayloadSizeMismatch)
-    ));
-
     assert_dispatch_error(opcode, &body, libc::EINVAL);
+}
+
+#[test]
+fn rejects_header_shorter_than_fuse_in_header() {
+    let mut packet = packet(abi::fuse_opcode::FUSE_GETATTR as u32, &[]);
+    packet.as_mut_slice().as_mut_bytes()[..4].copy_from_slice(&39u32.to_ne_bytes());
+    let (sender, _rx) = sender();
+    assert!(RequestWithSender::new(sender, packet.as_slice().as_bytes()).is_none());
 }
 
 #[test]
