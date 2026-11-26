@@ -8,6 +8,7 @@ use std::time::{Duration, SystemTime};
 use zerocopy::IntoBytes;
 
 use crate::ll::fuse_abi as abi;
+use crate::ll::request::RequestError;
 use crate::{
     BackingId, BsdFileFlags, CustomReplySender, DispatchContext, FileAttr, FileHandle, FileType,
     Filesystem, FilesystemMapping, FopenFlags, Generation, HandshakeOutcome, INodeNo, IdMap,
@@ -411,4 +412,27 @@ fn dispatch_acknowledges_destroy() {
     let reply = dispatch(&fs, 38, &[], mapping).try_recv().unwrap();
     assert_eq!(reply.len(), 16);
     assert_eq!(i32::from_ne_bytes(reply[4..8].try_into().unwrap()), 0);
+}
+
+#[test]
+fn dispatch_rejects_setxattr_with_mismatched_size() {
+    let mapping = FilesystemMapping::default();
+    let fs = Probe::new(mapping);
+    let mut body = vec![0; size_of::<abi::fuse_setxattr_in>()];
+    body[..size_of::<u32>()].copy_from_slice(&2u32.to_ne_bytes());
+    body.extend_from_slice(b"user.test\0a");
+    let opcode = abi::fuse_opcode::FUSE_SETXATTR as u32;
+    let packet = packet(opcode, &body);
+    let request = crate::ll::AnyRequest::try_from(packet.as_slice().as_bytes()).unwrap();
+    assert!(matches!(
+        request.operation(),
+        Err(RequestError::InvalidArguments)
+    ));
+
+    let reply = dispatch(&fs, opcode, &body, mapping).try_recv().unwrap();
+    assert_eq!(reply.len(), 16);
+    assert_eq!(
+        i32::from_ne_bytes(reply[4..8].try_into().unwrap()),
+        -libc::EINVAL
+    );
 }
