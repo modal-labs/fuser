@@ -367,15 +367,16 @@ fn session_acl_uses_client_credentials() {
 
 #[test]
 fn init_bounds_readahead_and_page_count() {
-    let page = page_size::get() as u32;
-    let limit = u32::from(u16::MAX) * page;
-    for (offered, expected_bytes, expected_pages) in [
-        (limit - page, limit - page, u16::MAX - 1),
-        (limit - 1, limit - 1, u16::MAX),
-        (limit, limit, u16::MAX),
-        (limit + 1, limit, u16::MAX),
-        (u32::MAX, limit, u16::MAX),
-    ] {
+    let page = page_size::get() as u64;
+    let page_limit = u64::from(u16::MAX) * page;
+    let wire_limit = u64::from(u32::MAX);
+    let limit = page_limit.min(wire_limit);
+    for offer in [limit - page, limit - 1, limit, limit + 1, wire_limit] {
+        let Ok(offered) = u32::try_from(offer) else {
+            continue;
+        };
+        let expected_bytes = offer.min(page_limit);
+        let expected_pages = expected_bytes.div_ceil(page);
         let mut body = vec![0; size_of::<abi::fuse_init_in>()];
         body[..4].copy_from_slice(&7u32.to_ne_bytes());
         body[4..8].copy_from_slice(&31u32.to_ne_bytes());
@@ -392,11 +393,11 @@ fn init_bounds_readahead_and_page_count() {
         let pages = offset_of!(abi::fuse_init_out, max_pages);
         assert_eq!(
             u32::from_ne_bytes(out[read_ahead..read_ahead + 4].try_into().unwrap()),
-            expected_bytes
+            u32::try_from(expected_bytes).unwrap()
         );
         assert_eq!(
             u16::from_ne_bytes(out[pages..pages + 2].try_into().unwrap()),
-            expected_pages
+            u16::try_from(expected_pages).unwrap()
         );
     }
 }
