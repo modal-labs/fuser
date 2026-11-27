@@ -1,6 +1,7 @@
 # FUSE for Rust - Changelog
 
 ## Unreleased
+* Bound INIT readahead to the largest representable page count.
 * Reject malformed FUSE requests without panicking.
 * Add `ReplyEntry::entry_with_nodeid()`, `ReplyCreate::created_with_nodeid()` and
   `ReplyCreate::created_passthrough_with_nodeid()` to reply with a nodeid other than `attr.ino`
