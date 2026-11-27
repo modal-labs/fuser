@@ -234,6 +234,9 @@ pub struct KernelConfig {
 
 impl KernelConfig {
     fn new(capabilities: InitFlags, max_readahead: u32, kernel_abi: Version) -> Self {
+        // INIT reports readahead in bytes and the maximum request size in a u16 page count.
+        let max_readahead =
+            max_readahead.min(u32::from(u16::MAX).saturating_mul(page_size::get() as u32));
         Self {
             capabilities,
             requested: default_init_flags(capabilities),
@@ -399,7 +402,7 @@ impl KernelConfig {
     }
 
     fn max_pages(&self) -> u16 {
-        ((max(self.max_write, self.max_readahead) - 1) / page_size::get() as u32) as u16 + 1
+        max(self.max_write, self.max_readahead).div_ceil(page_size::get() as u32) as u16
     }
 }
 
